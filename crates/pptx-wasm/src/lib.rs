@@ -1,8 +1,13 @@
 //! PPTX display-list wasm boundary.
 
+use std::io::Cursor;
+
 use wasm_bindgen::prelude::*;
 
 pub use pptx_edit::wasm::PptxDocument;
+
+const MAX_IMAGE_PIXELS: u64 = 33_554_432;
+const MAX_IMAGE_BYTES: u64 = 268_435_456;
 
 #[wasm_bindgen]
 pub struct PptxRenderer {
@@ -126,6 +131,82 @@ pub fn renderer_version() -> String {
     env!("CARGO_PKG_VERSION").to_owned()
 }
 
+#[wasm_bindgen(js_name = decodeTiffPng)]
+pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
+    decode_tiff(data).map_err(js_error)
+}
+
+fn decode_tiff(data: &[u8]) -> Result<Vec<u8>, String> {
+    use image::{ImageDecoder as _, ImageEncoder as _};
+
+    let mut decoder = image::ImageReader::with_format(Cursor::new(data), image::ImageFormat::Tiff)
+        .into_decoder()
+        .map_err(|error| error.to_string())?;
+    let (width, height) = decoder.dimensions();
+    let pixels = u64::from(width) * u64::from(height);
+    let bytes = decoder
+        .total_bytes()
+        .saturating_add(pixels.saturating_mul(4));
+    if !image_fits_budget(pixels, bytes) {
+        return Err("TIFF image exceeds the browser decode budget".to_owned());
+    }
+    let orientation = decoder.orientation().map_err(|error| error.to_string())?;
+    let mut decoded =
+        image::DynamicImage::from_decoder(decoder).map_err(|error| error.to_string())?;
+    decoded.apply_orientation(orientation);
+    let rgba = decoded.into_rgba8();
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(png)
+}
+
+fn image_fits_budget(pixels: u64, bytes: u64) -> bool {
+    pixels <= MAX_IMAGE_PIXELS && bytes <= MAX_IMAGE_BYTES
+}
+
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::ImageEncoder as _;
+
+    #[test]
+    fn decodes_tiff_to_png() {
+        let mut tiff = Cursor::new(Vec::new());
+        image::codecs::tiff::TiffEncoder::new(&mut tiff)
+            .write_image(
+                &[255, 0, 0, 255, 0, 128, 255, 64],
+                2,
+                1,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        let png = decode_tiff(&tiff.into_inner()).unwrap();
+        let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .unwrap()
+            .into_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.as_raw(), &[255, 0, 0, 255, 0, 128, 255, 64]);
+    }
+
+    #[test]
+    fn rejects_invalid_tiff() {
+        assert!(decode_tiff(b"II*\0").is_err());
+    }
+
+    #[test]
+    fn rejects_images_past_the_decode_budget() {
+        assert!(!image_fits_budget(MAX_IMAGE_PIXELS + 1, 0));
+        assert!(!image_fits_budget(0, MAX_IMAGE_BYTES + 1));
+    }
 }

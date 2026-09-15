@@ -1,11 +1,23 @@
+import { decodeTiffImage } from '../wasm/loader';
+
 const MAX_BITMAP_PIXELS = 33_554_432;
 
-/** Decode bitmap-only WMF wrappers without changing stored media. */
+/** Convert presentation image formats that browsers cannot decode. */
 export function presentationImageBlob(bytes: Uint8Array): Blob {
+  if (isTiff(bytes)) {
+    return new Blob([decodeTiffImage(bytes).slice()], { type: 'image/png' });
+  }
   const bitmap = wmfBitmap(bytes);
   return bitmap
     ? new Blob([bitmap], { type: 'image/bmp' })
     : new Blob([bytes.slice()]);
+}
+
+function isTiff(bytes: Uint8Array): boolean {
+  return bytes.length >= 4 && (
+    bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2a && bytes[3] === 0
+    || bytes[0] === 0x4d && bytes[1] === 0x4d && bytes[2] === 0 && bytes[3] === 0x2a
+  );
 }
 
 function wmfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
