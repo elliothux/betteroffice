@@ -4,8 +4,6 @@ use wasm_bindgen::prelude::*;
 
 pub use pptx_edit::wasm::PptxDocument;
 
-mod tiff;
-
 #[wasm_bindgen]
 pub struct PptxRenderer {
     renderer: pptx_render::SlideRenderer,
@@ -130,7 +128,7 @@ pub fn renderer_version() -> String {
 
 #[wasm_bindgen(js_name = decodeTiffPng)]
 pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
-    tiff::decode_tiff_png(data).map_err(js_error)
+    ooxml_drawingml::media::decode_tiff_png(data).map_err(js_error)
 }
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {

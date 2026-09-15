@@ -4,11 +4,11 @@ extern crate tiff as tiff_crate;
 
 use std::io::{Cursor, Read, Write};
 
-const MAX_IMAGE_PIXELS: u64 = 33_554_432;
-const MAX_IMAGE_BYTES: u64 = 268_435_456;
-const MAX_TIFF_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
+pub const MAX_IMAGE_BYTES: u64 = 268_435_456;
+pub const MAX_TIFF_BYTES: u64 = 32 * 1024 * 1024;
 
-pub(crate) fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, String> {
+pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, String> {
     use tiff_crate::decoder::{Decoder, DecodingResult};
     use tiff_crate::tags::Tag;
 

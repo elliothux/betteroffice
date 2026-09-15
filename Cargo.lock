@@ -143,9 +143,14 @@ dependencies = [
 name = "betteroffice-drawingml"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "indexmap",
+ "png",
  "proptest",
  "serde",
+ "tiff",
+ "weezl",
 ]
 
 [[package]]
@@ -1034,16 +1039,12 @@ dependencies = [
 name = "pptx-wasm"
 version = "0.0.0"
 dependencies = [
+ "betteroffice-drawingml",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-render",
- "crc32fast",
- "flate2",
- "png",
  "serde_json",
- "tiff",
  "wasm-bindgen",
- "weezl",
 ]
 
 [[package]]
