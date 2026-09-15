@@ -1037,9 +1037,13 @@ dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-render",
- "image",
+ "crc32fast",
+ "flate2",
+ "png",
  "serde_json",
+ "tiff",
  "wasm-bindgen",
+ "weezl",
 ]
 
 [[package]]
