@@ -1,12 +1,12 @@
 {
-  "name": "@betteroffice/docx-node-darwin-x64",
+  "name": "@betteroffice/docx-native-darwin-x64",
   "version": "0.0.1",
   "cpu": [
     "x64"
   ],
-  "main": "betteroffice-docx-node.darwin-x64.node",
+  "main": "betteroffice-docx-native.darwin-x64.node",
   "files": [
-    "betteroffice-docx-node.darwin-x64.node"
+    "betteroffice-docx-native.darwin-x64.node"
   ],
   "description": "Native Node.js bindings for the BetterOffice DOCX engine.",
   "keywords": [

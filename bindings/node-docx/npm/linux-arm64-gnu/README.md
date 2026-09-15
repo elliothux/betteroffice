@@ -1,3 +1,3 @@
-# `@betteroffice/docx-node-linux-arm64-gnu`
+# `@betteroffice/docx-native-linux-arm64-gnu`
 
-This is the **aarch64-unknown-linux-gnu** binary for `@betteroffice/docx-node`
+This is the **aarch64-unknown-linux-gnu** binary for `@betteroffice/docx-native`

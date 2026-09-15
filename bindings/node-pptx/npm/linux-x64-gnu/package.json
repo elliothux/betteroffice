@@ -1,12 +1,12 @@
 {
-  "name": "@betteroffice/pptx-node-linux-x64-gnu",
+  "name": "@betteroffice/pptx-native-linux-x64-gnu",
   "version": "0.0.1",
   "cpu": [
     "x64"
   ],
-  "main": "betteroffice-pptx-node.linux-x64-gnu.node",
+  "main": "betteroffice-pptx-native.linux-x64-gnu.node",
   "files": [
-    "betteroffice-pptx-node.linux-x64-gnu.node"
+    "betteroffice-pptx-native.linux-x64-gnu.node"
   ],
   "description": "Native Node.js bindings for the BetterOffice PPTX engine.",
   "keywords": [

@@ -1,12 +1,12 @@
 {
-  "name": "@betteroffice/xlsx-node-darwin-arm64",
+  "name": "@betteroffice/xlsx-native-darwin-arm64",
   "version": "0.0.1",
   "cpu": [
     "arm64"
   ],
-  "main": "betteroffice-xlsx-node.darwin-arm64.node",
+  "main": "betteroffice-xlsx-native.darwin-arm64.node",
   "files": [
-    "betteroffice-xlsx-node.darwin-arm64.node"
+    "betteroffice-xlsx-native.darwin-arm64.node"
   ],
   "description": "Native Node.js bindings for the BetterOffice XLSX engine.",
   "keywords": [

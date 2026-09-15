@@ -7,7 +7,7 @@ const fixture = readFileSync(
   new URL('../../crates/ooxml-opc/tests/fixtures/sample.xlsx', import.meta.url)
 );
 
-describe('@betteroffice/xlsx-node', () => {
+describe('@betteroffice/xlsx-native', () => {
   test('opens, inspects, edits, renders, and saves a workbook', async () => {
     const workbook = await openWorkbook(fixture);
 

@@ -1,4 +1,4 @@
-# @betteroffice/xlsx-node
+# @betteroffice/xlsx-native
 
 Native Node.js bindings for the BetterOffice XLSX Rust facade. The package is intended for servers, CLIs, Electron applications, and other Node.js hosts that need the native engine without a browser or WebAssembly runtime.
 

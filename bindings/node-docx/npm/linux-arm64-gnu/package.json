@@ -1,12 +1,12 @@
 {
-  "name": "@betteroffice/docx-node-linux-arm64-gnu",
+  "name": "@betteroffice/docx-native-linux-arm64-gnu",
   "version": "0.0.1",
   "cpu": [
     "arm64"
   ],
-  "main": "betteroffice-docx-node.linux-arm64-gnu.node",
+  "main": "betteroffice-docx-native.linux-arm64-gnu.node",
   "files": [
-    "betteroffice-docx-node.linux-arm64-gnu.node"
+    "betteroffice-docx-native.linux-arm64-gnu.node"
   ],
   "description": "Native Node.js bindings for the BetterOffice DOCX engine.",
   "keywords": [

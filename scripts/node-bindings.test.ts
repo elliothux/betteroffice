@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -61,5 +61,68 @@ describe('Node binding release wiring', () => {
     );
     expect(dist.jobs.bindings.strategy.matrix.platform).toHaveLength(5);
     expect(dist.jobs.bindings.steps[0].with.ref).toBe('${{ inputs.sha }}');
+  });
+});
+
+describe('Node binding public names', () => {
+  const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+  const distWorkflowText = read('.github/workflows/node-dist.yml');
+  const changeset = read('.changeset/native-node-bindings.md');
+
+  test('root manifests carry the -native public name and binary', () => {
+    for (const path of NODE_BINDINGS) {
+      const manifest = JSON.parse(read(`${path}/package.json`));
+      const format = path.replace('bindings/node-', '');
+      expect(manifest.name).toBe(`@betteroffice/${format}-native`);
+      expect(manifest.napi.packageName).toBe(`@betteroffice/${format}-native`);
+      expect(manifest.napi.binaryName).toBe(`betteroffice-${format}-native`);
+    }
+  });
+
+  test('platform packages match the root binary and version', () => {
+    for (const path of NODE_BINDINGS) {
+      const manifest = JSON.parse(read(`${path}/package.json`));
+      const format = path.replace('bindings/node-', '');
+      for (const identity of readdirSync(new URL(`../${path}/npm`, import.meta.url))) {
+        const platform = JSON.parse(read(`${path}/npm/${identity}/package.json`));
+        expect(platform.version).toBe(manifest.version);
+        expect(platform.name.startsWith(`@betteroffice/${format}-native-`)).toBe(true);
+        const triple = platform.name.replace(`@betteroffice/${format}-native-`, '');
+        expect(identity).toBe(triple);
+        expect(platform.main).toBe(`${manifest.napi.binaryName}.${triple}.node`);
+        expect(platform.files).toEqual([platform.main]);
+        const readme = read(`${path}/npm/${identity}/README.md`);
+        expect(readme).toContain(`# \`${platform.name}\``);
+        expect(readme).toContain(`binary for \`${manifest.name}\``);
+      }
+    }
+  });
+
+  test('generated loaders require only the -native platform packages', () => {
+    for (const path of NODE_BINDINGS) {
+      const manifest = JSON.parse(read(`${path}/package.json`));
+      const format = path.replace('bindings/node-', '');
+      const loader = read(`${path}/index.js`);
+      const required = [...loader.matchAll(/require\('(@betteroffice\/[^']+)'\)/g)].map((m) => m[1]);
+      expect(required.length).toBeGreaterThan(0);
+      for (const name of required) {
+        expect(name.startsWith(`@betteroffice/${format}-native`)).toBe(true);
+      }
+      expect(loader).toContain(`./${manifest.napi.binaryName}.`);
+      expect(loader).not.toContain(`@betteroffice/${format}-node`);
+      expect(loader).not.toContain(`betteroffice-${format}-node`);
+    }
+  });
+
+  test('the dist workflow collects the renamed binaries', () => {
+    expect(distWorkflowText).toContain('betteroffice-${{ inputs.binding }}-native.*.node');
+    expect(distWorkflowText).not.toContain('-node.*.node');
+  });
+
+  test('the changeset versions the -native names', () => {
+    for (const name of NODE_BINDING_NAMES) {
+      expect(changeset).toContain(`'@betteroffice/${name}-native'`);
+      expect(changeset).not.toContain(`'@betteroffice/${name}-node'`);
+    }
   });
 });

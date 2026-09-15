@@ -70,13 +70,13 @@ function requireNative() {
   } else if (process.platform === 'android') {
     if (process.arch === 'arm64') {
       try {
-        return require('./betteroffice-docx-node.android-arm64.node')
+        return require('./betteroffice-docx-native.android-arm64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-android-arm64')
-        const bindingPackageVersion = require('@betteroffice/docx-node-android-arm64/package.json').version
+        const binding = require('@betteroffice/docx-native-android-arm64')
+        const bindingPackageVersion = require('@betteroffice/docx-native-android-arm64/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -86,13 +86,13 @@ function requireNative() {
       }
     } else if (process.arch === 'arm') {
       try {
-        return require('./betteroffice-docx-node.android-arm-eabi.node')
+        return require('./betteroffice-docx-native.android-arm-eabi.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-android-arm-eabi')
-        const bindingPackageVersion = require('@betteroffice/docx-node-android-arm-eabi/package.json').version
+        const binding = require('@betteroffice/docx-native-android-arm-eabi')
+        const bindingPackageVersion = require('@betteroffice/docx-native-android-arm-eabi/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -107,13 +107,13 @@ function requireNative() {
     if (process.arch === 'x64') {
       if ((process.config && process.config.variables && process.config.variables.shlib_suffix === 'dll.a') || (process.config && process.config.variables && process.config.variables.node_target_type === 'shared_library')) {
         try {
-        return require('./betteroffice-docx-node.win32-x64-gnu.node')
+        return require('./betteroffice-docx-native.win32-x64-gnu.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-win32-x64-gnu')
-        const bindingPackageVersion = require('@betteroffice/docx-node-win32-x64-gnu/package.json').version
+        const binding = require('@betteroffice/docx-native-win32-x64-gnu')
+        const bindingPackageVersion = require('@betteroffice/docx-native-win32-x64-gnu/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -123,13 +123,13 @@ function requireNative() {
       }
       } else {
         try {
-        return require('./betteroffice-docx-node.win32-x64-msvc.node')
+        return require('./betteroffice-docx-native.win32-x64-msvc.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-win32-x64-msvc')
-        const bindingPackageVersion = require('@betteroffice/docx-node-win32-x64-msvc/package.json').version
+        const binding = require('@betteroffice/docx-native-win32-x64-msvc')
+        const bindingPackageVersion = require('@betteroffice/docx-native-win32-x64-msvc/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -140,13 +140,13 @@ function requireNative() {
       }
     } else if (process.arch === 'ia32') {
       try {
-        return require('./betteroffice-docx-node.win32-ia32-msvc.node')
+        return require('./betteroffice-docx-native.win32-ia32-msvc.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-win32-ia32-msvc')
-        const bindingPackageVersion = require('@betteroffice/docx-node-win32-ia32-msvc/package.json').version
+        const binding = require('@betteroffice/docx-native-win32-ia32-msvc')
+        const bindingPackageVersion = require('@betteroffice/docx-native-win32-ia32-msvc/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -156,13 +156,13 @@ function requireNative() {
       }
     } else if (process.arch === 'arm64') {
       try {
-        return require('./betteroffice-docx-node.win32-arm64-msvc.node')
+        return require('./betteroffice-docx-native.win32-arm64-msvc.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-win32-arm64-msvc')
-        const bindingPackageVersion = require('@betteroffice/docx-node-win32-arm64-msvc/package.json').version
+        const binding = require('@betteroffice/docx-native-win32-arm64-msvc')
+        const bindingPackageVersion = require('@betteroffice/docx-native-win32-arm64-msvc/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -175,13 +175,13 @@ function requireNative() {
     }
   } else if (process.platform === 'darwin') {
     try {
-      return require('./betteroffice-docx-node.darwin-universal.node')
+      return require('./betteroffice-docx-native.darwin-universal.node')
     } catch (e) {
       loadErrors.push(e)
     }
     try {
-      const binding = require('@betteroffice/docx-node-darwin-universal')
-      const bindingPackageVersion = require('@betteroffice/docx-node-darwin-universal/package.json').version
+      const binding = require('@betteroffice/docx-native-darwin-universal')
+      const bindingPackageVersion = require('@betteroffice/docx-native-darwin-universal/package.json').version
       if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
         throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
       }
@@ -191,13 +191,13 @@ function requireNative() {
     }
     if (process.arch === 'x64') {
       try {
-        return require('./betteroffice-docx-node.darwin-x64.node')
+        return require('./betteroffice-docx-native.darwin-x64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-darwin-x64')
-        const bindingPackageVersion = require('@betteroffice/docx-node-darwin-x64/package.json').version
+        const binding = require('@betteroffice/docx-native-darwin-x64')
+        const bindingPackageVersion = require('@betteroffice/docx-native-darwin-x64/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -207,13 +207,13 @@ function requireNative() {
       }
     } else if (process.arch === 'arm64') {
       try {
-        return require('./betteroffice-docx-node.darwin-arm64.node')
+        return require('./betteroffice-docx-native.darwin-arm64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-darwin-arm64')
-        const bindingPackageVersion = require('@betteroffice/docx-node-darwin-arm64/package.json').version
+        const binding = require('@betteroffice/docx-native-darwin-arm64')
+        const bindingPackageVersion = require('@betteroffice/docx-native-darwin-arm64/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -227,13 +227,13 @@ function requireNative() {
   } else if (process.platform === 'freebsd') {
     if (process.arch === 'x64') {
       try {
-        return require('./betteroffice-docx-node.freebsd-x64.node')
+        return require('./betteroffice-docx-native.freebsd-x64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-freebsd-x64')
-        const bindingPackageVersion = require('@betteroffice/docx-node-freebsd-x64/package.json').version
+        const binding = require('@betteroffice/docx-native-freebsd-x64')
+        const bindingPackageVersion = require('@betteroffice/docx-native-freebsd-x64/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -243,13 +243,13 @@ function requireNative() {
       }
     } else if (process.arch === 'arm64') {
       try {
-        return require('./betteroffice-docx-node.freebsd-arm64.node')
+        return require('./betteroffice-docx-native.freebsd-arm64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-freebsd-arm64')
-        const bindingPackageVersion = require('@betteroffice/docx-node-freebsd-arm64/package.json').version
+        const binding = require('@betteroffice/docx-native-freebsd-arm64')
+        const bindingPackageVersion = require('@betteroffice/docx-native-freebsd-arm64/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -264,13 +264,13 @@ function requireNative() {
     if (process.arch === 'x64') {
       if (isMusl()) {
         try {
-          return require('./betteroffice-docx-node.linux-x64-musl.node')
+          return require('./betteroffice-docx-native.linux-x64-musl.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@betteroffice/docx-node-linux-x64-musl')
-          const bindingPackageVersion = require('@betteroffice/docx-node-linux-x64-musl/package.json').version
+          const binding = require('@betteroffice/docx-native-linux-x64-musl')
+          const bindingPackageVersion = require('@betteroffice/docx-native-linux-x64-musl/package.json').version
           if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -280,13 +280,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./betteroffice-docx-node.linux-x64-gnu.node')
+          return require('./betteroffice-docx-native.linux-x64-gnu.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@betteroffice/docx-node-linux-x64-gnu')
-          const bindingPackageVersion = require('@betteroffice/docx-node-linux-x64-gnu/package.json').version
+          const binding = require('@betteroffice/docx-native-linux-x64-gnu')
+          const bindingPackageVersion = require('@betteroffice/docx-native-linux-x64-gnu/package.json').version
           if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -298,13 +298,13 @@ function requireNative() {
     } else if (process.arch === 'arm64') {
       if (isMusl()) {
         try {
-          return require('./betteroffice-docx-node.linux-arm64-musl.node')
+          return require('./betteroffice-docx-native.linux-arm64-musl.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@betteroffice/docx-node-linux-arm64-musl')
-          const bindingPackageVersion = require('@betteroffice/docx-node-linux-arm64-musl/package.json').version
+          const binding = require('@betteroffice/docx-native-linux-arm64-musl')
+          const bindingPackageVersion = require('@betteroffice/docx-native-linux-arm64-musl/package.json').version
           if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -314,13 +314,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./betteroffice-docx-node.linux-arm64-gnu.node')
+          return require('./betteroffice-docx-native.linux-arm64-gnu.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@betteroffice/docx-node-linux-arm64-gnu')
-          const bindingPackageVersion = require('@betteroffice/docx-node-linux-arm64-gnu/package.json').version
+          const binding = require('@betteroffice/docx-native-linux-arm64-gnu')
+          const bindingPackageVersion = require('@betteroffice/docx-native-linux-arm64-gnu/package.json').version
           if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -332,13 +332,13 @@ function requireNative() {
     } else if (process.arch === 'arm') {
       if (isMusl()) {
         try {
-          return require('./betteroffice-docx-node.linux-arm-musleabihf.node')
+          return require('./betteroffice-docx-native.linux-arm-musleabihf.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@betteroffice/docx-node-linux-arm-musleabihf')
-          const bindingPackageVersion = require('@betteroffice/docx-node-linux-arm-musleabihf/package.json').version
+          const binding = require('@betteroffice/docx-native-linux-arm-musleabihf')
+          const bindingPackageVersion = require('@betteroffice/docx-native-linux-arm-musleabihf/package.json').version
           if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -348,13 +348,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./betteroffice-docx-node.linux-arm-gnueabihf.node')
+          return require('./betteroffice-docx-native.linux-arm-gnueabihf.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@betteroffice/docx-node-linux-arm-gnueabihf')
-          const bindingPackageVersion = require('@betteroffice/docx-node-linux-arm-gnueabihf/package.json').version
+          const binding = require('@betteroffice/docx-native-linux-arm-gnueabihf')
+          const bindingPackageVersion = require('@betteroffice/docx-native-linux-arm-gnueabihf/package.json').version
           if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -366,13 +366,13 @@ function requireNative() {
     } else if (process.arch === 'loong64') {
       if (isMusl()) {
         try {
-          return require('./betteroffice-docx-node.linux-loong64-musl.node')
+          return require('./betteroffice-docx-native.linux-loong64-musl.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@betteroffice/docx-node-linux-loong64-musl')
-          const bindingPackageVersion = require('@betteroffice/docx-node-linux-loong64-musl/package.json').version
+          const binding = require('@betteroffice/docx-native-linux-loong64-musl')
+          const bindingPackageVersion = require('@betteroffice/docx-native-linux-loong64-musl/package.json').version
           if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -382,13 +382,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./betteroffice-docx-node.linux-loong64-gnu.node')
+          return require('./betteroffice-docx-native.linux-loong64-gnu.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@betteroffice/docx-node-linux-loong64-gnu')
-          const bindingPackageVersion = require('@betteroffice/docx-node-linux-loong64-gnu/package.json').version
+          const binding = require('@betteroffice/docx-native-linux-loong64-gnu')
+          const bindingPackageVersion = require('@betteroffice/docx-native-linux-loong64-gnu/package.json').version
           if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -400,13 +400,13 @@ function requireNative() {
     } else if (process.arch === 'riscv64') {
       if (isMusl()) {
         try {
-          return require('./betteroffice-docx-node.linux-riscv64-musl.node')
+          return require('./betteroffice-docx-native.linux-riscv64-musl.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@betteroffice/docx-node-linux-riscv64-musl')
-          const bindingPackageVersion = require('@betteroffice/docx-node-linux-riscv64-musl/package.json').version
+          const binding = require('@betteroffice/docx-native-linux-riscv64-musl')
+          const bindingPackageVersion = require('@betteroffice/docx-native-linux-riscv64-musl/package.json').version
           if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -416,13 +416,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require('./betteroffice-docx-node.linux-riscv64-gnu.node')
+          return require('./betteroffice-docx-native.linux-riscv64-gnu.node')
         } catch (e) {
           loadErrors.push(e)
         }
         try {
-          const binding = require('@betteroffice/docx-node-linux-riscv64-gnu')
-          const bindingPackageVersion = require('@betteroffice/docx-node-linux-riscv64-gnu/package.json').version
+          const binding = require('@betteroffice/docx-native-linux-riscv64-gnu')
+          const bindingPackageVersion = require('@betteroffice/docx-native-linux-riscv64-gnu/package.json').version
           if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
             throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
@@ -433,13 +433,13 @@ function requireNative() {
       }
     } else if (process.arch === 'ppc64') {
       try {
-        return require('./betteroffice-docx-node.linux-ppc64-gnu.node')
+        return require('./betteroffice-docx-native.linux-ppc64-gnu.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-linux-ppc64-gnu')
-        const bindingPackageVersion = require('@betteroffice/docx-node-linux-ppc64-gnu/package.json').version
+        const binding = require('@betteroffice/docx-native-linux-ppc64-gnu')
+        const bindingPackageVersion = require('@betteroffice/docx-native-linux-ppc64-gnu/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -449,13 +449,13 @@ function requireNative() {
       }
     } else if (process.arch === 's390x') {
       try {
-        return require('./betteroffice-docx-node.linux-s390x-gnu.node')
+        return require('./betteroffice-docx-native.linux-s390x-gnu.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-linux-s390x-gnu')
-        const bindingPackageVersion = require('@betteroffice/docx-node-linux-s390x-gnu/package.json').version
+        const binding = require('@betteroffice/docx-native-linux-s390x-gnu')
+        const bindingPackageVersion = require('@betteroffice/docx-native-linux-s390x-gnu/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -469,13 +469,13 @@ function requireNative() {
   } else if (process.platform === 'openharmony') {
     if (process.arch === 'arm64') {
       try {
-        return require('./betteroffice-docx-node.openharmony-arm64.node')
+        return require('./betteroffice-docx-native.openharmony-arm64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-openharmony-arm64')
-        const bindingPackageVersion = require('@betteroffice/docx-node-openharmony-arm64/package.json').version
+        const binding = require('@betteroffice/docx-native-openharmony-arm64')
+        const bindingPackageVersion = require('@betteroffice/docx-native-openharmony-arm64/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -485,13 +485,13 @@ function requireNative() {
       }
     } else if (process.arch === 'x64') {
       try {
-        return require('./betteroffice-docx-node.openharmony-x64.node')
+        return require('./betteroffice-docx-native.openharmony-x64.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-openharmony-x64')
-        const bindingPackageVersion = require('@betteroffice/docx-node-openharmony-x64/package.json').version
+        const binding = require('@betteroffice/docx-native-openharmony-x64')
+        const bindingPackageVersion = require('@betteroffice/docx-native-openharmony-x64/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -501,13 +501,13 @@ function requireNative() {
       }
     } else if (process.arch === 'arm') {
       try {
-        return require('./betteroffice-docx-node.openharmony-arm.node')
+        return require('./betteroffice-docx-native.openharmony-arm.node')
       } catch (e) {
         loadErrors.push(e)
       }
       try {
-        const binding = require('@betteroffice/docx-node-openharmony-arm')
-        const bindingPackageVersion = require('@betteroffice/docx-node-openharmony-arm/package.json').version
+        const binding = require('@betteroffice/docx-native-openharmony-arm')
+        const bindingPackageVersion = require('@betteroffice/docx-native-openharmony-arm/package.json').version
         if (bindingPackageVersion !== '0.0.1' && process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
           throw new Error(`Native binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
         }
@@ -623,10 +623,10 @@ if (!nativeBinding || forceWasi) {
     let candidateError = null
     let candidateFailed = false
     try {
-      candidateError = __napiWasiResolveCandidate('./betteroffice-docx-node.wasi.cjs', false, ["./betteroffice-docx-node.wasm32-wasi.debug.wasm","./betteroffice-docx-node.wasm32-wasi.wasm"])
+      candidateError = __napiWasiResolveCandidate('./betteroffice-docx-native.wasi.cjs', false, ["./betteroffice-docx-native.wasm32-wasi.debug.wasm","./betteroffice-docx-native.wasm32-wasi.wasm"])
       candidateFailed = candidateError !== null
       if (!candidateFailed) {
-        wasiBinding = require('./betteroffice-docx-node.wasi.cjs')
+        wasiBinding = require('./betteroffice-docx-native.wasi.cjs')
         nativeBinding = wasiBinding
         wasiBindingLoaded = true
       }
@@ -643,16 +643,16 @@ if (!nativeBinding || forceWasi) {
     let candidateError = null
     let candidateFailed = false
     try {
-      candidateError = __napiWasiResolveCandidate('@betteroffice/docx-node-wasm32-wasi', true, undefined)
+      candidateError = __napiWasiResolveCandidate('@betteroffice/docx-native-wasm32-wasi', true, undefined)
       candidateFailed = candidateError !== null
       if (!candidateFailed) {
         if (process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== '0') {
-          const bindingPackageVersion = require('@betteroffice/docx-node-wasm32-wasi/package.json').version
+          const bindingPackageVersion = require('@betteroffice/docx-native-wasm32-wasi/package.json').version
           if (bindingPackageVersion !== '0.0.1') {
             throw new Error(`WASI binding package version mismatch, expected 0.0.1 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`)
           }
         }
-        wasiBinding = require('@betteroffice/docx-node-wasm32-wasi')
+        wasiBinding = require('@betteroffice/docx-native-wasm32-wasi')
         nativeBinding = wasiBinding
         wasiBindingLoaded = true
       }

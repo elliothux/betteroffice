@@ -186,7 +186,7 @@ describe('the npm publish set', () => {
   test('covers non-private workspaces and native platform packages', () => {
     const names = packages.map((entry) => entry.name);
     expect(names).toContain('@betteroffice/fonts');
-    expect(names).toContain('@betteroffice/docx-node-darwin-arm64');
+    expect(names).toContain('@betteroffice/docx-native-darwin-arm64');
     expect(names).not.toContain('@betteroffice/rust-crates');
     expect(names).not.toContain('@betteroffice/collaboration-relay');
   });

@@ -1,6 +1,6 @@
 name: Publish a Node native binding
 
-run-name: Publish @betteroffice/${{ inputs.binding }}-node @ ${{ inputs.sha }}
+run-name: Publish @betteroffice/${{ inputs.binding }}-native @ ${{ inputs.sha }}
 on:
   workflow_dispatch:
     inputs:
@@ -35,7 +35,7 @@ jobs:
       contents: read
 
   publish:
-    name: Publish @betteroffice/${{ inputs.binding }}-node
+    name: Publish @betteroffice/${{ inputs.binding }}-native
     needs: dist
     runs-on: ubuntu-latest
     timeout-minutes: 15

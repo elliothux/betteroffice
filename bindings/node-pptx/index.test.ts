@@ -10,7 +10,7 @@ const font = readFileSync(
   new URL('../../crates/pptx-raster/tests/assets/Carlito-Regular.ttf', import.meta.url)
 );
 
-describe('@betteroffice/pptx-node', () => {
+describe('@betteroffice/pptx-native', () => {
   test('opens, inspects, renders, and saves a presentation', async () => {
     const presentation = await openPresentation(fixture);
     const snapshot = await presentation.snapshot();

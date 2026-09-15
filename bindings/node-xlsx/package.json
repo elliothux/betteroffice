@@ -1,5 +1,5 @@
 {
-  "name": "@betteroffice/xlsx-node",
+  "name": "@betteroffice/xlsx-native",
   "version": "0.0.1",
   "description": "Native Node.js bindings for the BetterOffice XLSX engine.",
   "main": "index.js",
@@ -9,8 +9,8 @@
     "index.d.ts"
   ],
   "napi": {
-    "binaryName": "betteroffice-xlsx-node",
-    "packageName": "@betteroffice/xlsx-node",
+    "binaryName": "betteroffice-xlsx-native",
+    "packageName": "@betteroffice/xlsx-native",
     "npmClient": "npm",
     "rootPublisher": "npm",
     "targets": [

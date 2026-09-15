@@ -1,5 +1,5 @@
 {
-  "name": "@betteroffice/pptx-node",
+  "name": "@betteroffice/pptx-native",
   "version": "0.0.1",
   "description": "Native Node.js bindings for the BetterOffice PPTX engine.",
   "main": "index.js",
@@ -9,8 +9,8 @@
     "index.d.ts"
   ],
   "napi": {
-    "binaryName": "betteroffice-pptx-node",
-    "packageName": "@betteroffice/pptx-node",
+    "binaryName": "betteroffice-pptx-native",
+    "packageName": "@betteroffice/pptx-native",
     "npmClient": "npm",
     "rootPublisher": "npm",
     "targets": [

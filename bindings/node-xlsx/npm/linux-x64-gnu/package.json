@@ -1,12 +1,12 @@
 {
-  "name": "@betteroffice/xlsx-node-linux-x64-gnu",
+  "name": "@betteroffice/xlsx-native-linux-x64-gnu",
   "version": "0.0.1",
   "cpu": [
     "x64"
   ],
-  "main": "betteroffice-xlsx-node.linux-x64-gnu.node",
+  "main": "betteroffice-xlsx-native.linux-x64-gnu.node",
   "files": [
-    "betteroffice-xlsx-node.linux-x64-gnu.node"
+    "betteroffice-xlsx-native.linux-x64-gnu.node"
   ],
   "description": "Native Node.js bindings for the BetterOffice XLSX engine.",
   "keywords": [

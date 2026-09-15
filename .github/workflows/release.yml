@@ -127,7 +127,7 @@ jobs:
               -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
               runs="$runs $binding:$run"
             else
-              echo "::error::Dispatching @betteroffice/$binding-node failed."
+              echo "::error::Dispatching @betteroffice/$binding-native failed."
               status=1
             fi
           done
@@ -136,7 +136,7 @@ jobs:
             binding=${entry%%:*}
             run=${entry#*:}
             if ! gh run watch "$run" --exit-status; then
-              echo "::error::@betteroffice/$binding-node did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
+              echo "::error::@betteroffice/$binding-native did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
               status=1
             fi
           done

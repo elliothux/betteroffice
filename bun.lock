@@ -143,15 +143,15 @@
       },
     },
     "bindings/node-docx": {
-      "name": "@betteroffice/docx-node",
+      "name": "@betteroffice/docx-native",
       "version": "0.0.1",
     },
     "bindings/node-pptx": {
-      "name": "@betteroffice/pptx-node",
+      "name": "@betteroffice/pptx-native",
       "version": "0.0.1",
     },
     "bindings/node-xlsx": {
-      "name": "@betteroffice/xlsx-node",
+      "name": "@betteroffice/xlsx-native",
       "version": "0.0.1",
     },
     "bindings/python-docx": {
@@ -584,7 +584,7 @@
 
     "@betteroffice/docx-i18n": ["@betteroffice/docx-i18n@workspace:packages/docx-i18n"],
 
-    "@betteroffice/docx-node": ["@betteroffice/docx-node@workspace:bindings/node-docx"],
+    "@betteroffice/docx-native": ["@betteroffice/docx-native@workspace:bindings/node-docx"],
 
     "@betteroffice/docx-react": ["@betteroffice/docx-react@workspace:packages/docx-react"],
 
@@ -596,7 +596,7 @@
 
     "@betteroffice/pptx-i18n": ["@betteroffice/pptx-i18n@workspace:packages/pptx-i18n"],
 
-    "@betteroffice/pptx-node": ["@betteroffice/pptx-node@workspace:bindings/node-pptx"],
+    "@betteroffice/pptx-native": ["@betteroffice/pptx-native@workspace:bindings/node-pptx"],
 
     "@betteroffice/pptx-react": ["@betteroffice/pptx-react@workspace:packages/pptx-react"],
 
@@ -624,7 +624,7 @@
 
     "@betteroffice/xlsx-i18n": ["@betteroffice/xlsx-i18n@workspace:packages/xlsx-i18n"],
 
-    "@betteroffice/xlsx-node": ["@betteroffice/xlsx-node@workspace:bindings/node-xlsx"],
+    "@betteroffice/xlsx-native": ["@betteroffice/xlsx-native@workspace:bindings/node-xlsx"],
 
     "@betteroffice/xlsx-react": ["@betteroffice/xlsx-react@workspace:packages/xlsx-react"],
 

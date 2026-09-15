@@ -1,5 +1,5 @@
 {
-  "name": "@betteroffice/docx-node",
+  "name": "@betteroffice/docx-native",
   "version": "0.0.1",
   "description": "Native Node.js bindings for the BetterOffice DOCX engine.",
   "main": "index.js",
@@ -9,8 +9,8 @@
     "index.d.ts"
   ],
   "napi": {
-    "binaryName": "betteroffice-docx-node",
-    "packageName": "@betteroffice/docx-node",
+    "binaryName": "betteroffice-docx-native",
+    "packageName": "@betteroffice/docx-native",
     "npmClient": "npm",
     "rootPublisher": "npm",
     "targets": [

@@ -1,12 +1,12 @@
 {
-  "name": "@betteroffice/pptx-node-darwin-arm64",
+  "name": "@betteroffice/pptx-native-darwin-arm64",
   "version": "0.0.1",
   "cpu": [
     "arm64"
   ],
-  "main": "betteroffice-pptx-node.darwin-arm64.node",
+  "main": "betteroffice-pptx-native.darwin-arm64.node",
   "files": [
-    "betteroffice-pptx-node.darwin-arm64.node"
+    "betteroffice-pptx-native.darwin-arm64.node"
   ],
   "description": "Native Node.js bindings for the BetterOffice PPTX engine.",
   "keywords": [

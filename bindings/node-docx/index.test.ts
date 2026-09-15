@@ -19,7 +19,7 @@ const font = readFileSync(
   new URL('../../crates/docx-raster/tests/assets/Carlito-Regular.ttf', import.meta.url)
 );
 
-describe('@betteroffice/docx-node', () => {
+describe('@betteroffice/docx-native', () => {
   test('opens, inspects, lays out, renders, and saves a document', async () => {
     const document = await openDocument(fixture, { author: 'Node test' });
 

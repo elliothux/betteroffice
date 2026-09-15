@@ -1,3 +1,3 @@
-# `@betteroffice/docx-node-darwin-x64`
+# `@betteroffice/docx-native-darwin-x64`
 
-This is the **x86_64-apple-darwin** binary for `@betteroffice/docx-node`
+This is the **x86_64-apple-darwin** binary for `@betteroffice/docx-native`

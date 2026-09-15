@@ -58,5 +58,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: node-${{ inputs.binding }}.${{ matrix.platform.target }}
-          path: bindings/node-${{ inputs.binding }}/betteroffice-${{ inputs.binding }}-node.*.node
+          path: bindings/node-${{ inputs.binding }}/betteroffice-${{ inputs.binding }}-native.*.node
           if-no-files-found: error
