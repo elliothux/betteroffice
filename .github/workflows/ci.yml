@@ -236,3 +236,25 @@ jobs:
 
       - name: Check generated bindings
         run: git diff --exit-code -- 'bindings/node-*/index.js' 'bindings/node-*/index.d.ts'
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: "v2.9.0"
+
+      - name: Check native runtime compatibility
+        run: |
+          node scripts/native-bindings-smoke.mjs
+          bun scripts/native-bindings-smoke.mjs
+          smoke_dir=$(mktemp -d)
+          trap 'rm -rf "$smoke_dir"' EXIT
+          for format in docx pptx xlsx; do
+            package_dir="$smoke_dir/node_modules/@betteroffice/$format-native"
+            mkdir -p "$package_dir"
+            cp "bindings/node-$format/package.json" "bindings/node-$format/index.js" "bindings/node-$format/index.d.ts" bindings/node-$format/*.node "$package_dir/"
+          done
+          cp scripts/native-bindings-smoke.mjs "$smoke_dir/smoke.mjs"
+          deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi "$smoke_dir/smoke.mjs" "$PWD"

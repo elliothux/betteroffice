@@ -52,5 +52,6 @@
   "publishConfig": {
     "access": "public",
     "provenance": true
-  }
+  },
+  "type": "commonjs"
 }
