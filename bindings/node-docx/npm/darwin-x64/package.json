@@ -8,12 +8,15 @@
   "files": [
     "betteroffice-docx-native.darwin-x64.node"
   ],
-  "description": "Native Node.js bindings for the BetterOffice DOCX engine.",
+  "description": "Native Rust bindings for the BetterOffice DOCX engine in Node.js and Bun.",
   "keywords": [
     "docx",
     "word",
     "ooxml",
+    "nodejs",
     "node-api",
+    "bun",
+    "native",
     "rust"
   ],
   "homepage": "https://betteroffice.dev/",

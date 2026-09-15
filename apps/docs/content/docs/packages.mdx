@@ -10,7 +10,7 @@ the runtime you call them from and how much of the pipeline is exposed.
 | Runtime | Install | Guide |
 | --- | --- | --- |
 | Browser or React | `npm install @betteroffice/docx-react` | [JavaScript](./javascript) |
-| Native Node.js | `npm install @betteroffice/docx-native` | [JavaScript](./javascript#run-natively-in-nodejs) |
+| Native Node.js/Bun | `npm install @betteroffice/docx-native` | [JavaScript](./javascript#run-natively-in-nodejs-and-bun) |
 | Native Rust | `cargo add betteroffice-docx` | [Rust](./rust) |
 | Python | `pip install betteroffice-docx` | [Python](./python) |
 
@@ -66,7 +66,7 @@ both are declared optional peers.
   canvas, selection, keyboard, and review UI.
 - **Your own UI in the browser** — the framework-free cores. Same engine, no
   React: display lists, hit-testing, and a document handle.
-- **A server, CLI, or Electron app in Node.js** — the `-native` packages. They
+- **A server, CLI, or Electron app in Node.js or Bun** — the `-native` packages. They
   call the native Rust facades directly and need no browser, canvas, or WASM runtime.
 - **A server, a CLI, or a pipeline in Rust** — the three facade crates.
 - **A server, a notebook, or an agent in Python** — the three `betteroffice-*`

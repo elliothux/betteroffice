@@ -8,13 +8,16 @@
   "files": [
     "betteroffice-pptx-native.win32-x64-msvc.node"
   ],
-  "description": "Native Node.js bindings for the BetterOffice PPTX engine.",
+  "description": "Native Rust bindings for the BetterOffice PPTX engine in Node.js and Bun.",
   "keywords": [
     "pptx",
     "powerpoint",
     "presentation",
     "ooxml",
+    "nodejs",
     "node-api",
+    "bun",
+    "native",
     "rust"
   ],
   "homepage": "https://betteroffice.dev/",

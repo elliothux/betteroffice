@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/pptx-native",
   "version": "0.0.1",
-  "description": "Native Node.js bindings for the BetterOffice PPTX engine.",
+  "description": "Native Rust bindings for the BetterOffice PPTX engine in Node.js and Bun.",
   "main": "index.js",
   "types": "index.d.ts",
   "files": [
@@ -37,7 +37,10 @@
     "powerpoint",
     "presentation",
     "ooxml",
+    "nodejs",
     "node-api",
+    "bun",
+    "native",
     "rust"
   ],
   "license": "Apache-2.0",

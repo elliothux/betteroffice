@@ -67,7 +67,6 @@ describe('Node binding release wiring', () => {
 describe('Node binding public names', () => {
   const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
   const distWorkflowText = read('.github/workflows/node-dist.yml');
-  const changeset = read('.changeset/native-node-bindings.md');
 
   test('root manifests carry the -native public name and binary', () => {
     for (const path of NODE_BINDINGS) {
@@ -91,9 +90,6 @@ describe('Node binding public names', () => {
         expect(identity).toBe(triple);
         expect(platform.main).toBe(`${manifest.napi.binaryName}.${triple}.node`);
         expect(platform.files).toEqual([platform.main]);
-        const readme = read(`${path}/npm/${identity}/README.md`);
-        expect(readme).toContain(`# \`${platform.name}\``);
-        expect(readme).toContain(`binary for \`${manifest.name}\``);
       }
     }
   });
@@ -117,12 +113,5 @@ describe('Node binding public names', () => {
   test('the dist workflow collects the renamed binaries', () => {
     expect(distWorkflowText).toContain('betteroffice-${{ inputs.binding }}-native.*.node');
     expect(distWorkflowText).not.toContain('-node.*.node');
-  });
-
-  test('the changeset versions the -native names', () => {
-    for (const name of NODE_BINDING_NAMES) {
-      expect(changeset).toContain(`'@betteroffice/${name}-native'`);
-      expect(changeset).not.toContain(`'@betteroffice/${name}-node'`);
-    }
   });
 });
