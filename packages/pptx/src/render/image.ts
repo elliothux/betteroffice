@@ -1,7 +1,7 @@
+import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import { decodeTiffImage } from '../wasm/loader';
 
 const MAX_BITMAP_PIXELS = 33_554_432;
-const MAX_TIFF_BYTES = 32 * 1024 * 1024;
 
 /** Convert presentation image formats that browsers cannot decode. */
 export function presentationImageBlob(bytes: Uint8Array): Blob {
@@ -15,13 +15,6 @@ export function presentationImageBlob(bytes: Uint8Array): Blob {
   return bitmap
     ? new Blob([bitmap], { type: 'image/bmp' })
     : new Blob([bytes.slice()]);
-}
-
-function isTiff(bytes: Uint8Array): boolean {
-  return bytes.length >= 4 && (
-    bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2a && bytes[3] === 0
-    || bytes[0] === 0x4d && bytes[1] === 0x4d && bytes[2] === 0 && bytes[3] === 0x2a
-  );
 }
 
 function wmfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
