@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use betteroffice_xlsx::{
     CalculationOptions, CellEdit, CellRange, CellRef, CellValue as CoreCellValue,
@@ -8,7 +8,7 @@ use betteroffice_xlsx::{
     NumberFormatMutation, Proposal as CoreProposal, ProposalEditInput as CoreProposalEditInput,
     ProposalRequest, RenderOptions, SheetId, StylePatch, TextWrapping, VerticalAlignment, Workbook,
 };
-use napi::bindgen_prelude::{AsyncTask, Buffer, Task};
+use napi::bindgen_prelude::{AsyncTask, Buffer, Task, ToNapiValue, TypeName};
 use napi::{Env, Error, Result};
 use napi_derive::napi;
 
@@ -16,16 +16,12 @@ fn error(reason: impl ToString) -> Error {
     Error::from_reason(reason.to_string())
 }
 
-fn lock<T>(value: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
-    value.lock().map_err(|_| error("workbook lock is poisoned"))
-}
-
 fn cell_ref(address: &str) -> Result<CellRef> {
-    CellRef::parse_a1(address).map_err(error)
+    CellRef::parse_a1(&address.to_ascii_uppercase()).map_err(error)
 }
 
 fn cell_range(range: &str) -> Result<CellRange> {
-    CellRange::parse_a1(range).map_err(error)
+    CellRange::parse_a1(&range.to_ascii_uppercase()).map_err(error)
 }
 
 fn client_id(value: f64) -> Result<u64> {
@@ -276,13 +272,71 @@ fn text_wrapping(value: &str) -> Result<TextWrapping> {
     }
 }
 
+type Job = Box<dyn FnOnce(&mut Workbook) + Send>;
+
+#[derive(Clone)]
+pub struct Worker {
+    sender: Sender<Job>,
+}
+
+impl Worker {
+    fn start(mut workbook: Workbook) -> Result<Self> {
+        let (sender, receive) = mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("betteroffice-xlsx".to_owned())
+            .spawn(move || {
+                for job in receive {
+                    job(&mut workbook);
+                }
+            })
+            .map_err(error)?;
+        Ok(Self { sender })
+    }
+
+    fn submit<T, F>(&self, operation: F) -> Result<AsyncTask<PendingTask<T>>>
+    where
+        T: ToNapiValue + TypeName + Send + 'static,
+        F: FnOnce(&mut Workbook) -> Result<T> + Send + 'static,
+    {
+        let (reply, receive) = mpsc::channel();
+        self.sender
+            .send(Box::new(move |workbook| {
+                let _ = reply.send(operation(workbook));
+            }))
+            .map_err(|_| error("workbook worker stopped"))?;
+        Ok(AsyncTask::new(PendingTask { receive }))
+    }
+}
+
+pub struct PendingTask<T> {
+    receive: Receiver<Result<T>>,
+}
+
+impl<T> Task for PendingTask<T>
+where
+    T: ToNapiValue + TypeName + Send + 'static,
+{
+    type Output = T;
+    type JsValue = T;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.receive
+            .recv()
+            .map_err(|_| error("workbook worker stopped"))?
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
 pub struct OpenTask {
     bytes: Vec<u8>,
     options: OpenWorkbookOptions,
 }
 
 impl Task for OpenTask {
-    type Output = Workbook;
+    type Output = Worker;
     type JsValue = XlsxWorkbook;
 
     fn compute(&mut self) -> Result<Self::Output> {
@@ -290,7 +344,7 @@ impl Task for OpenTask {
             now_serial: self.options.now_serial,
         };
         let client_id = self.options.client_id.map(client_id).transpose()?;
-        match (
+        let workbook = match (
             client_id,
             self.options.read_only.unwrap_or(false),
             self.options.recalculate.unwrap_or(false),
@@ -303,189 +357,168 @@ impl Task for OpenTask {
             (None, false, true) => Workbook::open_recalculated(&self.bytes, calculation),
             (None, false, false) => Workbook::open(&self.bytes),
         }
-        .map_err(error)
+        .map_err(error)?;
+        Worker::start(workbook)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(XlsxWorkbook {
-            inner: Arc::new(Mutex::new(output)),
-        })
-    }
-}
-
-pub struct RenderTask {
-    workbook: Arc<Mutex<Workbook>>,
-    sheet: SheetId,
-    options: RenderOptions,
-}
-
-impl Task for RenderTask {
-    type Output = betteroffice_xlsx::RenderedPng;
-    type JsValue = RenderedSheet;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        lock(&self.workbook)?
-            .render_sheet(self.sheet, &self.options)
-            .map_err(error)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(RenderedSheet {
-            data: output.bytes.into(),
-            width: output.width,
-            height: output.height,
-        })
-    }
-}
-
-pub struct SaveTask {
-    workbook: Arc<Mutex<Workbook>>,
-}
-
-impl Task for SaveTask {
-    type Output = Vec<u8>;
-    type JsValue = Buffer;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        lock(&self.workbook)?.save().map_err(error)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output.into())
+        Ok(XlsxWorkbook { worker: output })
     }
 }
 
 #[napi(js_name = "Workbook")]
 pub struct XlsxWorkbook {
-    inner: Arc<Mutex<Workbook>>,
+    worker: Worker,
 }
 
 #[napi]
 impl XlsxWorkbook {
-    #[napi(getter)]
-    pub fn client_id(&self) -> Result<f64> {
-        Ok(lock(&self.inner)?.client_id() as f64)
+    #[napi(getter, ts_return_type = "Promise<number>")]
+    pub fn client_id(&self) -> Result<AsyncTask<PendingTask<f64>>> {
+        self.worker
+            .submit(|workbook| Ok(workbook.client_id() as f64))
     }
 
-    #[napi(getter)]
-    pub fn collaborative(&self) -> Result<bool> {
-        Ok(lock(&self.inner)?.is_collaborative())
+    #[napi(getter, ts_return_type = "Promise<boolean>")]
+    pub fn collaborative(&self) -> Result<AsyncTask<PendingTask<bool>>> {
+        self.worker
+            .submit(|workbook| Ok(workbook.is_collaborative()))
     }
 
-    #[napi(getter)]
-    pub fn sheet_count(&self) -> Result<u32> {
-        Ok(lock(&self.inner)?.sheet_count() as u32)
+    #[napi(getter, ts_return_type = "Promise<number>")]
+    pub fn sheet_count(&self) -> Result<AsyncTask<PendingTask<u32>>> {
+        self.worker
+            .submit(|workbook| Ok(workbook.sheet_count() as u32))
     }
 
-    #[napi(getter)]
-    pub fn active_sheet(&self) -> Result<u32> {
-        Ok(lock(&self.inner)?.active_sheet().0)
+    #[napi(getter, ts_return_type = "Promise<number>")]
+    pub fn active_sheet(&self) -> Result<AsyncTask<PendingTask<u32>>> {
+        self.worker.submit(|workbook| Ok(workbook.active_sheet().0))
     }
 
-    #[napi(setter)]
-    pub fn set_active_sheet(&self, sheet: u32) -> Result<()> {
-        lock(&self.inner)?
-            .set_active_sheet(SheetId(sheet))
-            .map_err(error)
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn set_active_sheet(&self, sheet: u32) -> Result<AsyncTask<PendingTask<()>>> {
+        self.worker
+            .submit(move |workbook| workbook.set_active_sheet(SheetId(sheet)).map_err(error))
     }
 
-    #[napi]
-    pub fn sheet_info(&self) -> Result<SheetInfo> {
-        let value = lock(&self.inner)?.sheet_info().map_err(error)?;
-        Ok(SheetInfo {
-            ids: value.sheet_ids,
-            names: value.sheet_names,
-            active_sheet: value.active_sheet.0,
-            content_width: f64::from(value.content_width),
-            content_height: f64::from(value.content_height),
-            frozen_rows: value.frozen_rows,
-            frozen_columns: value.frozen_cols,
-            initial_scroll_x: f64::from(value.initial_scroll_x),
-            initial_scroll_y: f64::from(value.initial_scroll_y),
+    #[napi(ts_return_type = "Promise<SheetInfo>")]
+    pub fn sheet_info(&self) -> Result<AsyncTask<PendingTask<SheetInfo>>> {
+        self.worker.submit(|workbook| {
+            let value = workbook.sheet_info().map_err(error)?;
+            Ok(SheetInfo {
+                ids: value.sheet_ids,
+                names: value.sheet_names,
+                active_sheet: value.active_sheet.0,
+                content_width: f64::from(value.content_width),
+                content_height: f64::from(value.content_height),
+                frozen_rows: value.frozen_rows,
+                frozen_columns: value.frozen_cols,
+                initial_scroll_x: f64::from(value.initial_scroll_x),
+                initial_scroll_y: f64::from(value.initial_scroll_y),
+            })
         })
     }
 
-    #[napi]
-    pub fn cell(&self, sheet: u32, address: String) -> Result<CellValue> {
-        let value = lock(&self.inner)?
-            .cell(SheetId(sheet), cell_ref(&address)?)
-            .map_err(error)?;
-        Ok(map_cell(address, value))
+    #[napi(ts_return_type = "Promise<CellValue>")]
+    pub fn cell(&self, sheet: u32, address: String) -> Result<AsyncTask<PendingTask<CellValue>>> {
+        let cell = cell_ref(&address)?;
+        self.worker.submit(move |workbook| {
+            let value = workbook.cell(SheetId(sheet), cell).map_err(error)?;
+            Ok(map_cell(address, value))
+        })
     }
 
-    #[napi]
-    pub fn value(&self, sheet: u32, address: String) -> Result<CellComputedValue> {
-        let workbook = lock(&self.inner)?;
-        let sheet = workbook.sheet(SheetId(sheet)).map_err(error)?;
-        Ok(sheet
-            .cell(cell_ref(&address)?)
-            .map(|cell| map_computed_value(&cell.value))
-            .unwrap_or_else(|| map_computed_value(&CoreCellValue::Empty)))
+    #[napi(ts_return_type = "Promise<CellComputedValue>")]
+    pub fn value(
+        &self,
+        sheet: u32,
+        address: String,
+    ) -> Result<AsyncTask<PendingTask<CellComputedValue>>> {
+        let cell = cell_ref(&address)?;
+        self.worker.submit(move |workbook| {
+            let sheet = workbook.sheet(SheetId(sheet)).map_err(error)?;
+            Ok(sheet
+                .cell(cell)
+                .map(|cell| map_computed_value(&cell.value))
+                .unwrap_or_else(|| map_computed_value(&CoreCellValue::Empty)))
+        })
     }
 
-    #[napi]
-    pub fn formula(&self, sheet: u32, address: String) -> Result<Option<String>> {
-        let workbook = lock(&self.inner)?;
-        let sheet = workbook.sheet(SheetId(sheet)).map_err(error)?;
-        Ok(sheet
-            .cell(cell_ref(&address)?)
-            .and_then(|cell| cell.formula.clone()))
+    #[napi(ts_return_type = "Promise<string | null>")]
+    pub fn formula(
+        &self,
+        sheet: u32,
+        address: String,
+    ) -> Result<AsyncTask<PendingTask<Option<String>>>> {
+        let cell = cell_ref(&address)?;
+        self.worker.submit(move |workbook| {
+            let sheet = workbook.sheet(SheetId(sheet)).map_err(error)?;
+            Ok(sheet.cell(cell).and_then(|cell| cell.formula.clone()))
+        })
     }
 
-    #[napi]
-    pub fn range(&self, sheet: u32, range: String) -> Result<Vec<Vec<CellValue>>> {
+    #[napi(ts_return_type = "Promise<CellValue[][]>")]
+    pub fn range(
+        &self,
+        sheet: u32,
+        range: String,
+    ) -> Result<AsyncTask<PendingTask<Vec<Vec<CellValue>>>>> {
         let parsed = cell_range(&range)?;
-        let workbook = lock(&self.inner)?;
-        let cells = workbook
-            .range_cells(SheetId(sheet), parsed)
-            .map_err(error)?;
-        Ok(cells
-            .into_iter()
-            .enumerate()
-            .map(|(row, values)| {
-                values
-                    .into_iter()
-                    .enumerate()
-                    .map(|(column, value)| {
-                        let address = CellRef::new(
-                            parsed.start.row + row as u32,
-                            parsed.start.col + column as u32,
-                        )
-                        .to_a1();
-                        map_cell(address, value)
-                    })
-                    .collect()
-            })
-            .collect())
+        self.worker.submit(move |workbook| {
+            let cells = workbook
+                .range_cells(SheetId(sheet), parsed)
+                .map_err(error)?;
+            Ok(cells
+                .into_iter()
+                .enumerate()
+                .map(|(row, values)| {
+                    values
+                        .into_iter()
+                        .enumerate()
+                        .map(|(column, value)| {
+                            let address = CellRef::new(
+                                parsed.start.row + row as u32,
+                                parsed.start.col + column as u32,
+                            )
+                            .to_a1();
+                            map_cell(address, value)
+                        })
+                        .collect()
+                })
+                .collect())
+        })
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<MutationResult>")]
     pub fn set(
         &self,
         sheet: u32,
         address: String,
         input: String,
         now_serial: Option<f64>,
-    ) -> Result<MutationResult> {
-        let mut workbook = lock(&self.inner)?;
-        let result = workbook
-            .edit_cell(
-                SheetId(sheet),
-                cell_ref(&address)?,
-                &input,
-                CalculationOptions { now_serial },
-            )
-            .map_err(error)?;
-        Ok(map_mutation(&workbook, result))
+    ) -> Result<AsyncTask<PendingTask<MutationResult>>> {
+        let cell = cell_ref(&address)?;
+        self.worker.submit(move |workbook| {
+            let result = workbook
+                .edit_cell(
+                    SheetId(sheet),
+                    cell,
+                    &input,
+                    CalculationOptions { now_serial },
+                )
+                .map_err(error)?;
+            Ok(map_mutation(workbook, result))
+        })
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<MutationResult>")]
     pub fn set_many(
         &self,
         sheet: u32,
         edits: Vec<CellInput>,
         now_serial: Option<f64>,
-    ) -> Result<MutationResult> {
+    ) -> Result<AsyncTask<PendingTask<MutationResult>>> {
         let edits = edits
             .into_iter()
             .map(|edit| {
@@ -495,100 +528,120 @@ impl XlsxWorkbook {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut workbook = lock(&self.inner)?;
-        let result = workbook
-            .edit_cells(SheetId(sheet), &edits, CalculationOptions { now_serial })
-            .map_err(error)?;
-        Ok(map_mutation(&workbook, result))
-    }
-
-    #[napi]
-    pub fn recalculate(&self, now_serial: Option<f64>) -> Result<CalculationResult> {
-        let mut workbook = lock(&self.inner)?;
-        let value = workbook.recalculate_all(CalculationOptions { now_serial });
-        Ok(CalculationResult {
-            changed: addresses(&workbook, value.changed),
-            cycle_cells: addresses(&workbook, value.cycle_cells),
-            limited_cells: addresses(&workbook, value.limited_cells),
+        self.worker.submit(move |workbook| {
+            let result = workbook
+                .edit_cells(SheetId(sheet), &edits, CalculationOptions { now_serial })
+                .map_err(error)?;
+            Ok(map_mutation(workbook, result))
         })
     }
 
-    #[napi(getter)]
-    pub fn history(&self) -> Result<HistoryState> {
-        let value = lock(&self.inner)?.history_state();
-        Ok(HistoryState {
-            can_undo: value.can_undo,
-            can_redo: value.can_redo,
-            undo_depth: value.undo_depth as u32,
-            redo_depth: value.redo_depth as u32,
+    #[napi(ts_return_type = "Promise<CalculationResult>")]
+    pub fn recalculate(
+        &self,
+        now_serial: Option<f64>,
+    ) -> Result<AsyncTask<PendingTask<CalculationResult>>> {
+        self.worker.submit(move |workbook| {
+            let value = workbook.recalculate_all(CalculationOptions { now_serial });
+            Ok(CalculationResult {
+                changed: addresses(workbook, value.changed),
+                cycle_cells: addresses(workbook, value.cycle_cells),
+                limited_cells: addresses(workbook, value.limited_cells),
+            })
         })
     }
 
-    #[napi(getter)]
-    pub fn can_undo(&self) -> Result<bool> {
-        Ok(lock(&self.inner)?.can_undo())
+    #[napi(getter, ts_return_type = "Promise<HistoryState>")]
+    pub fn history(&self) -> Result<AsyncTask<PendingTask<HistoryState>>> {
+        self.worker.submit(|workbook| {
+            let value = workbook.history_state();
+            Ok(HistoryState {
+                can_undo: value.can_undo,
+                can_redo: value.can_redo,
+                undo_depth: value.undo_depth as u32,
+                redo_depth: value.redo_depth as u32,
+            })
+        })
     }
 
-    #[napi(getter)]
-    pub fn can_redo(&self) -> Result<bool> {
-        Ok(lock(&self.inner)?.can_redo())
+    #[napi(getter, ts_return_type = "Promise<boolean>")]
+    pub fn can_undo(&self) -> Result<AsyncTask<PendingTask<bool>>> {
+        self.worker.submit(|workbook| Ok(workbook.can_undo()))
     }
 
-    #[napi]
-    pub fn undo(&self, now_serial: Option<f64>) -> Result<MutationResult> {
-        let mut workbook = lock(&self.inner)?;
-        let result = workbook
-            .undo(CalculationOptions { now_serial })
-            .map_err(error)?;
-        Ok(map_mutation(&workbook, result))
+    #[napi(getter, ts_return_type = "Promise<boolean>")]
+    pub fn can_redo(&self) -> Result<AsyncTask<PendingTask<bool>>> {
+        self.worker.submit(|workbook| Ok(workbook.can_redo()))
     }
 
-    #[napi]
-    pub fn redo(&self, now_serial: Option<f64>) -> Result<MutationResult> {
-        let mut workbook = lock(&self.inner)?;
-        let result = workbook
-            .redo(CalculationOptions { now_serial })
-            .map_err(error)?;
-        Ok(map_mutation(&workbook, result))
+    #[napi(ts_return_type = "Promise<MutationResult>")]
+    pub fn undo(&self, now_serial: Option<f64>) -> Result<AsyncTask<PendingTask<MutationResult>>> {
+        self.worker.submit(move |workbook| {
+            let result = workbook
+                .undo(CalculationOptions { now_serial })
+                .map_err(error)?;
+            Ok(map_mutation(workbook, result))
+        })
     }
 
-    #[napi]
-    pub fn encode_state_vector(&self) -> Result<Buffer> {
-        Ok(lock(&self.inner)?.encode_state_vector_v1().into())
+    #[napi(ts_return_type = "Promise<MutationResult>")]
+    pub fn redo(&self, now_serial: Option<f64>) -> Result<AsyncTask<PendingTask<MutationResult>>> {
+        self.worker.submit(move |workbook| {
+            let result = workbook
+                .redo(CalculationOptions { now_serial })
+                .map_err(error)?;
+            Ok(map_mutation(workbook, result))
+        })
     }
 
-    #[napi]
-    pub fn encode_state_as_update(&self) -> Result<Buffer> {
-        Ok(lock(&self.inner)?.encode_state_as_update_v1().into())
+    #[napi(ts_return_type = "Promise<Buffer>")]
+    pub fn encode_state_vector(&self) -> Result<AsyncTask<PendingTask<Buffer>>> {
+        self.worker
+            .submit(|workbook| Ok(workbook.encode_state_vector_v1().into()))
     }
 
-    #[napi]
-    pub fn encode_diff(&self, state_vector: Buffer) -> Result<Buffer> {
-        lock(&self.inner)?
-            .encode_diff_v1(&state_vector)
-            .map(Buffer::from)
-            .map_err(error)
+    #[napi(ts_return_type = "Promise<Buffer>")]
+    pub fn encode_state_as_update(&self) -> Result<AsyncTask<PendingTask<Buffer>>> {
+        self.worker
+            .submit(|workbook| Ok(workbook.encode_state_as_update_v1().into()))
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<Buffer>")]
+    pub fn encode_diff(&self, state_vector: Buffer) -> Result<AsyncTask<PendingTask<Buffer>>> {
+        let state_vector = state_vector.to_vec();
+        self.worker.submit(move |workbook| {
+            workbook
+                .encode_diff_v1(&state_vector)
+                .map(Buffer::from)
+                .map_err(error)
+        })
+    }
+
+    #[napi(ts_return_type = "Promise<CalculationResult>")]
     pub fn apply_update(
         &self,
         update: Buffer,
         now_serial: Option<f64>,
-    ) -> Result<CalculationResult> {
-        let value = lock(&self.inner)?
-            .apply_update_v1(&update, CalculationOptions { now_serial })
-            .map_err(error)?;
-        let workbook = lock(&self.inner)?;
-        Ok(CalculationResult {
-            changed: addresses(&workbook, value.changed),
-            cycle_cells: addresses(&workbook, value.cycle_cells),
-            limited_cells: addresses(&workbook, value.limited_cells),
+    ) -> Result<AsyncTask<PendingTask<CalculationResult>>> {
+        let update = update.to_vec();
+        self.worker.submit(move |workbook| {
+            let value = workbook
+                .apply_update_v1(&update, CalculationOptions { now_serial })
+                .map_err(error)?;
+            Ok(CalculationResult {
+                changed: addresses(workbook, value.changed),
+                cycle_cells: addresses(workbook, value.cycle_cells),
+                limited_cells: addresses(workbook, value.limited_cells),
+            })
         })
     }
 
-    #[napi]
-    pub fn propose(&self, proposal: ProposalInput, now_serial: Option<f64>) -> Result<Proposal> {
+    #[napi(ts_return_type = "Promise<Proposal>")]
+    pub fn propose(
+        &self,
+        proposal: ProposalInput,
+        now_serial: Option<f64>,
+    ) -> Result<AsyncTask<PendingTask<Proposal>>> {
         let edits = proposal
             .edits
             .into_iter()
@@ -601,80 +654,90 @@ impl XlsxWorkbook {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let value = lock(&self.inner)?
-            .propose(
-                ProposalRequest {
-                    agent_id: proposal.agent_id,
-                    note: proposal.note,
-                    edits,
-                },
-                CalculationOptions { now_serial },
-            )
-            .map_err(error)?;
-        Ok(map_proposal(&value))
+        self.worker.submit(move |workbook| {
+            let value = workbook
+                .propose(
+                    ProposalRequest {
+                        agent_id: proposal.agent_id,
+                        note: proposal.note,
+                        edits,
+                    },
+                    CalculationOptions { now_serial },
+                )
+                .map_err(error)?;
+            Ok(map_proposal(&value))
+        })
     }
 
-    #[napi(getter)]
-    pub fn proposals(&self) -> Result<Vec<Proposal>> {
-        Ok(lock(&self.inner)?
-            .proposals()
-            .iter()
-            .map(map_proposal)
-            .collect())
+    #[napi(getter, ts_return_type = "Promise<Proposal[]>")]
+    pub fn proposals(&self) -> Result<AsyncTask<PendingTask<Vec<Proposal>>>> {
+        self.worker
+            .submit(|workbook| Ok(workbook.proposals().iter().map(map_proposal).collect()))
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<MutationResult>")]
     pub fn accept_proposal(
         &self,
         proposal_id: String,
         force: Option<bool>,
         now_serial: Option<f64>,
-    ) -> Result<MutationResult> {
-        let mut workbook = lock(&self.inner)?;
-        let value = workbook
-            .accept_proposal(
-                &proposal_id,
-                force.unwrap_or(false),
-                CalculationOptions { now_serial },
-            )
-            .map_err(error)?;
-        Ok(map_mutation(&workbook, value.mutation))
-    }
-
-    #[napi]
-    pub fn reject_proposal(&self, proposal_id: String) -> Result<bool> {
-        Ok(lock(&self.inner)?.reject_proposal(&proposal_id))
-    }
-
-    #[napi]
-    pub fn merged_ranges(&self, sheet: u32, range: String) -> Result<Vec<String>> {
-        Ok(lock(&self.inner)?
-            .merged_ranges(SheetId(sheet), cell_range(&range)?)
-            .map_err(error)?
-            .into_iter()
-            .map(|value| value.to_a1())
-            .collect())
-    }
-
-    #[napi(getter)]
-    pub fn last_calculation(&self) -> Result<CalculationResult> {
-        let workbook = lock(&self.inner)?;
-        let value = workbook.last_calculation();
-        Ok(CalculationResult {
-            changed: addresses(&workbook, value.changed.clone()),
-            cycle_cells: addresses(&workbook, value.cycle_cells.clone()),
-            limited_cells: addresses(&workbook, value.limited_cells.clone()),
+    ) -> Result<AsyncTask<PendingTask<MutationResult>>> {
+        self.worker.submit(move |workbook| {
+            let value = workbook
+                .accept_proposal(
+                    &proposal_id,
+                    force.unwrap_or(false),
+                    CalculationOptions { now_serial },
+                )
+                .map_err(error)?;
+            Ok(map_mutation(workbook, value.mutation))
         })
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn reject_proposal(&self, proposal_id: String) -> Result<AsyncTask<PendingTask<bool>>> {
+        self.worker
+            .submit(move |workbook| Ok(workbook.reject_proposal(&proposal_id)))
+    }
+
+    #[napi(ts_return_type = "Promise<string[]>")]
+    pub fn merged_ranges(
+        &self,
+        sheet: u32,
+        range: String,
+    ) -> Result<AsyncTask<PendingTask<Vec<String>>>> {
+        let range = cell_range(&range)?;
+        self.worker.submit(move |workbook| {
+            Ok(workbook
+                .merged_ranges(SheetId(sheet), range)
+                .map_err(error)?
+                .into_iter()
+                .map(|value| value.to_a1())
+                .collect())
+        })
+    }
+
+    #[napi(getter, ts_return_type = "Promise<CalculationResult>")]
+    pub fn last_calculation(&self) -> Result<AsyncTask<PendingTask<CalculationResult>>> {
+        self.worker.submit(|workbook| {
+            let value = workbook.last_calculation();
+            Ok(CalculationResult {
+                changed: addresses(workbook, value.changed.clone()),
+                cycle_cells: addresses(workbook, value.cycle_cells.clone()),
+                limited_cells: addresses(workbook, value.limited_cells.clone()),
+            })
+        })
+    }
+
+    #[napi(ts_return_type = "Promise<MutationResult>")]
     pub fn set_number_format(
         &self,
         sheet: u32,
         range: String,
         format: String,
         now_serial: Option<f64>,
-    ) -> Result<MutationResult> {
+    ) -> Result<AsyncTask<PendingTask<MutationResult>>> {
+        let range = cell_range(&range)?;
         let format = match format.to_ascii_lowercase().as_str() {
             "automatic" => NumberFormatMutation::Automatic,
             "text" => NumberFormatMutation::PlainText,
@@ -686,26 +749,28 @@ impl XlsxWorkbook {
             "time" => NumberFormatMutation::Time,
             _ => NumberFormatMutation::Custom { pattern: format },
         };
-        let mut workbook = lock(&self.inner)?;
-        let value = workbook
-            .set_range_number_format(
-                SheetId(sheet),
-                cell_range(&range)?,
-                format,
-                CalculationOptions { now_serial },
-            )
-            .map_err(error)?;
-        Ok(map_mutation(&workbook, value))
+        self.worker.submit(move |workbook| {
+            let value = workbook
+                .set_range_number_format(
+                    SheetId(sheet),
+                    range,
+                    format,
+                    CalculationOptions { now_serial },
+                )
+                .map_err(error)?;
+            Ok(map_mutation(workbook, value))
+        })
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<MutationResult>")]
     pub fn set_style(
         &self,
         sheet: u32,
         range: String,
         style: StyleInput,
         now_serial: Option<f64>,
-    ) -> Result<MutationResult> {
+    ) -> Result<AsyncTask<PendingTask<MutationResult>>> {
+        let range = cell_range(&range)?;
         let patch = StylePatch {
             bold: style.bold,
             italic: style.italic,
@@ -732,23 +797,24 @@ impl XlsxWorkbook {
                 .transpose()?,
             clear: Vec::new(),
         };
-        let mut workbook = lock(&self.inner)?;
-        let value = workbook
-            .patch_range_style(
-                SheetId(sheet),
-                cell_range(&range)?,
-                patch,
-                CalculationOptions { now_serial },
-            )
-            .map_err(error)?;
-        Ok(map_mutation(&workbook, value))
+        self.worker.submit(move |workbook| {
+            let value = workbook
+                .patch_range_style(
+                    SheetId(sheet),
+                    range,
+                    patch,
+                    CalculationOptions { now_serial },
+                )
+                .map_err(error)?;
+            Ok(map_mutation(workbook, value))
+        })
     }
 
     #[napi(ts_return_type = "Promise<RenderedSheet>")]
     pub fn render_sheet(
         &self,
         options: Option<RenderSheetOptions>,
-    ) -> Result<AsyncTask<RenderTask>> {
+    ) -> Result<AsyncTask<PendingTask<RenderedSheet>>> {
         let options = options.unwrap_or(RenderSheetOptions {
             sheet: None,
             range: None,
@@ -756,24 +822,32 @@ impl XlsxWorkbook {
             max_width: None,
             max_height: None,
         });
-        let sheet = SheetId(options.sheet.unwrap_or(lock(&self.inner)?.active_sheet().0));
-        Ok(AsyncTask::new(RenderTask {
-            workbook: self.inner.clone(),
-            sheet,
-            options: RenderOptions {
-                range: options.range.as_deref().map(cell_range).transpose()?,
-                scale: options.scale.unwrap_or(1.0) as f32,
-                max_width: options.max_width,
-                max_height: options.max_height,
-            },
-        }))
+        let range = options.range.as_deref().map(cell_range).transpose()?;
+        self.worker.submit(move |workbook| {
+            let sheet = SheetId(options.sheet.unwrap_or(workbook.active_sheet().0));
+            let rendered = workbook
+                .render_sheet(
+                    sheet,
+                    &RenderOptions {
+                        range,
+                        scale: options.scale.unwrap_or(1.0) as f32,
+                        max_width: options.max_width,
+                        max_height: options.max_height,
+                    },
+                )
+                .map_err(error)?;
+            Ok(RenderedSheet {
+                data: rendered.bytes.into(),
+                width: rendered.width,
+                height: rendered.height,
+            })
+        })
     }
 
     #[napi(ts_return_type = "Promise<Buffer>")]
-    pub fn save(&self) -> AsyncTask<SaveTask> {
-        AsyncTask::new(SaveTask {
-            workbook: self.inner.clone(),
-        })
+    pub fn save(&self) -> Result<AsyncTask<PendingTask<Buffer>>> {
+        self.worker
+            .submit(|workbook| workbook.save().map(Buffer::from).map_err(error))
     }
 }
 

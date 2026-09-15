@@ -70,14 +70,14 @@ import { readFile } from "node:fs/promises";
 import { openWorkbook } from "@betteroffice/xlsx-node";
 
 const workbook = await openWorkbook(await readFile("report.xlsx"));
-workbook.set(0, "B10", "=SUM(B1:B9)");
+await workbook.set(0, "B10", "=SUM(B1:B9)");
 const png = await workbook.renderSheet({ sheet: 0, range: "A1:F20" });
 const saved = await workbook.save();
 ```
 
 The native packages accept and return `Buffer`, expose ordinary camel-cased
-objects, and move opening, layout, rasterization, and saving off the JavaScript
-event loop. Platform binaries are optional dependencies selected by npm, so
+objects, and run facade operations asynchronously in call order without blocking
+the JavaScript event loop. Platform binaries are optional dependencies selected by npm, so
 installing needs no Rust toolchain and downloads no executable at install time.
 Use `@betteroffice/docx-node`, `@betteroffice/xlsx-node`, or
 `@betteroffice/pptx-node` for the corresponding Rust facade.

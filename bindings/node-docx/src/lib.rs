@@ -1,20 +1,14 @@
 #![deny(clippy::all)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, Sender};
 
-use betteroffice_docx::{
-    Document, EditCtx, EditOrigin, ImageScope, LayoutInput, NoteKind, SaveOptions,
-};
-use napi::bindgen_prelude::{AsyncTask, Buffer, Task};
-use napi::{Env, Error, Result};
+use betteroffice_docx::{Document, EditCtx, EditOrigin, ImageScope, NoteKind, SaveOptions};
+use napi::bindgen_prelude::{AsyncTask, Buffer, Task, ToNapiValue, TypeName};
+use napi::{Env, Error, Result, ValueType, sys};
 use napi_derive::napi;
 
 fn error(reason: impl ToString) -> Error {
     Error::from_reason(reason.to_string())
-}
-
-fn lock<T>(value: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
-    value.lock().map_err(|_| error("document lock is poisoned"))
 }
 
 fn origin(value: &str) -> Result<EditOrigin> {
@@ -99,6 +93,82 @@ pub struct LayoutResult {
     pub display_list: serde_json::Value,
 }
 
+pub struct JsonValue(serde_json::Value);
+
+impl TypeName for JsonValue {
+    fn type_name() -> &'static str {
+        "any"
+    }
+
+    fn value_type() -> ValueType {
+        ValueType::Unknown
+    }
+}
+
+impl ToNapiValue for JsonValue {
+    unsafe fn to_napi_value(env: sys::napi_env, value: Self) -> Result<sys::napi_value> {
+        unsafe { serde_json::Value::to_napi_value(env, value.0) }
+    }
+}
+
+type Job = Box<dyn FnOnce(&mut Document) + Send>;
+
+#[derive(Clone)]
+pub struct Worker {
+    sender: Sender<Job>,
+}
+
+impl Worker {
+    fn start(mut document: Document) -> Result<Self> {
+        let (sender, receive) = mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("betteroffice-docx".to_owned())
+            .spawn(move || {
+                for job in receive {
+                    job(&mut document);
+                }
+            })
+            .map_err(error)?;
+        Ok(Self { sender })
+    }
+
+    fn submit<T, F>(&self, operation: F) -> Result<AsyncTask<PendingTask<T>>>
+    where
+        T: ToNapiValue + TypeName + Send + 'static,
+        F: FnOnce(&mut Document) -> Result<T> + Send + 'static,
+    {
+        let (reply, receive) = mpsc::channel();
+        self.sender
+            .send(Box::new(move |document| {
+                let _ = reply.send(operation(document));
+            }))
+            .map_err(|_| error("document worker stopped"))?;
+        Ok(AsyncTask::new(PendingTask { receive }))
+    }
+}
+
+pub struct PendingTask<T> {
+    receive: Receiver<Result<T>>,
+}
+
+impl<T> Task for PendingTask<T>
+where
+    T: ToNapiValue + TypeName + Send + 'static,
+{
+    type Output = T;
+    type JsValue = T;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.receive
+            .recv()
+            .map_err(|_| error("document worker stopped"))?
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
 pub struct OpenTask {
     bytes: Vec<u8>,
     author: String,
@@ -107,16 +177,16 @@ pub struct OpenTask {
 }
 
 impl Task for OpenTask {
-    type Output = Document;
+    type Output = Worker;
     type JsValue = DocxDocument;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        Document::open(&self.bytes).map_err(error)
+        Worker::start(Document::open(&self.bytes).map_err(error)?)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
         Ok(DocxDocument {
-            inner: Arc::new(Mutex::new(output)),
+            worker: output,
             author: self.author.clone(),
             origin: self.origin,
             timestamp: self.timestamp.clone(),
@@ -124,80 +194,9 @@ impl Task for OpenTask {
     }
 }
 
-pub struct LayoutTask {
-    document: Arc<Mutex<Document>>,
-    input: LayoutInput,
-}
-
-impl Task for LayoutTask {
-    type Output = (serde_json::Value, serde_json::Value);
-    type JsValue = LayoutResult;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        let result = lock(&self.document)?
-            .layout(self.input.clone())
-            .map_err(error)?;
-        Ok((
-            serde_json::to_value(result.layout).map_err(error)?,
-            serde_json::to_value(result.display_list).map_err(error)?,
-        ))
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(LayoutResult {
-            layout: output.0,
-            display_list: output.1,
-        })
-    }
-}
-
-pub struct RenderTask {
-    document: Arc<Mutex<Document>>,
-    display_list: betteroffice_docx::DisplayList,
-    page: usize,
-}
-
-impl Task for RenderTask {
-    type Output = betteroffice_docx::RenderedPage;
-    type JsValue = RenderedPage;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        lock(&self.document)?
-            .render_png(&self.display_list, self.page)
-            .map_err(error)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(RenderedPage {
-            data: output.bytes.into(),
-            skipped_images: output.skipped_images as u32,
-        })
-    }
-}
-
-pub struct SaveTask {
-    document: Arc<Mutex<Document>>,
-    options: SaveOptions,
-}
-
-impl Task for SaveTask {
-    type Output = Vec<u8>;
-    type JsValue = Buffer;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        lock(&self.document)?
-            .save_with_options(self.options.clone())
-            .map_err(error)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output.into())
-    }
-}
-
 #[napi(js_name = "Document")]
 pub struct DocxDocument {
-    inner: Arc<Mutex<Document>>,
+    worker: Worker,
     author: String,
     origin: EditOrigin,
     timestamp: String,
@@ -236,158 +235,206 @@ impl DocxDocument {
         self.timestamp = timestamp;
     }
 
-    #[napi(getter)]
-    pub fn paragraph_ids(&self) -> Result<Vec<Option<String>>> {
-        Ok(lock(&self.inner)?
-            .paragraphs()
-            .into_iter()
-            .map(|paragraph| paragraph.para_id.clone())
-            .collect())
-    }
-
-    #[napi(getter)]
-    pub fn warnings(&self) -> Result<Vec<String>> {
-        Ok(lock(&self.inner)?.model().warnings.clone())
-    }
-
-    #[napi(getter)]
-    pub fn template_variables(&self) -> Result<Vec<String>> {
-        Ok(lock(&self.inner)?.model().template_variables.clone())
-    }
-
-    #[napi(getter)]
-    pub fn text(&self) -> Result<String> {
-        Ok(lock(&self.inner)?
-            .paragraphs()
-            .into_iter()
-            .map(betteroffice_docx::get_paragraph_text)
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"))
-    }
-
-    #[napi(getter)]
-    pub fn structure(&self) -> Result<DocumentStructure> {
-        let value = lock(&self.inner)?.structure();
-        Ok(DocumentStructure {
-            body_paragraphs: value.body_paragraphs as u32,
-            body_tables: value.body_tables as u32,
-            sections: value.sections as u32,
-            headers: value.headers as u32,
-            footers: value.footers as u32,
-            footnotes: value.footnotes as u32,
-            endnotes: value.endnotes as u32,
+    #[napi(getter, ts_return_type = "Promise<Array<string | null>>")]
+    pub fn paragraph_ids(&self) -> Result<AsyncTask<PendingTask<Vec<Option<String>>>>> {
+        self.worker.submit(|document| {
+            Ok(document
+                .paragraphs()
+                .into_iter()
+                .map(|paragraph| paragraph.para_id.clone())
+                .collect())
         })
     }
 
-    #[napi]
-    pub fn body(&self) -> Result<serde_json::Value> {
-        serde_json::to_value(lock(&self.inner)?.body()).map_err(error)
+    #[napi(getter, ts_return_type = "Promise<string[]>")]
+    pub fn warnings(&self) -> Result<AsyncTask<PendingTask<Vec<String>>>> {
+        self.worker
+            .submit(|document| Ok(document.model().warnings.clone()))
     }
 
-    #[napi]
-    pub fn headers(&self) -> Result<serde_json::Value> {
-        serde_json::to_value(lock(&self.inner)?.headers()).map_err(error)
+    #[napi(getter, ts_return_type = "Promise<string[]>")]
+    pub fn template_variables(&self) -> Result<AsyncTask<PendingTask<Vec<String>>>> {
+        self.worker
+            .submit(|document| Ok(document.model().template_variables.clone()))
     }
 
-    #[napi]
-    pub fn footers(&self) -> Result<serde_json::Value> {
-        serde_json::to_value(lock(&self.inner)?.footers()).map_err(error)
+    #[napi(getter, ts_return_type = "Promise<string>")]
+    pub fn text(&self) -> Result<AsyncTask<PendingTask<String>>> {
+        self.worker.submit(|document| {
+            Ok(document
+                .paragraphs()
+                .into_iter()
+                .map(betteroffice_docx::get_paragraph_text)
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"))
+        })
     }
 
-    #[napi]
-    pub fn sections(&self) -> Result<serde_json::Value> {
-        serde_json::to_value(lock(&self.inner)?.sections()).map_err(error)
+    #[napi(getter, ts_return_type = "Promise<DocumentStructure>")]
+    pub fn structure(&self) -> Result<AsyncTask<PendingTask<DocumentStructure>>> {
+        self.worker.submit(|document| {
+            let value = document.structure();
+            Ok(DocumentStructure {
+                body_paragraphs: value.body_paragraphs as u32,
+                body_tables: value.body_tables as u32,
+                sections: value.sections as u32,
+                headers: value.headers as u32,
+                footers: value.footers as u32,
+                footnotes: value.footnotes as u32,
+                endnotes: value.endnotes as u32,
+            })
+        })
     }
 
-    #[napi]
-    pub fn paragraphs(&self) -> Result<serde_json::Value> {
-        serde_json::to_value(lock(&self.inner)?.paragraphs()).map_err(error)
+    #[napi(ts_return_type = "Promise<any>")]
+    pub fn body(&self) -> Result<AsyncTask<PendingTask<JsonValue>>> {
+        self.worker.submit(|document| {
+            serde_json::to_value(document.body())
+                .map(JsonValue)
+                .map_err(error)
+        })
     }
 
-    #[napi]
-    pub fn tables(&self) -> Result<serde_json::Value> {
-        serde_json::to_value(lock(&self.inner)?.tables()).map_err(error)
+    #[napi(ts_return_type = "Promise<any>")]
+    pub fn headers(&self) -> Result<AsyncTask<PendingTask<JsonValue>>> {
+        self.worker.submit(|document| {
+            serde_json::to_value(document.headers())
+                .map(JsonValue)
+                .map_err(error)
+        })
     }
 
-    #[napi]
-    pub fn paragraph(&self, paragraph_id: String) -> Result<Option<serde_json::Value>> {
-        lock(&self.inner)?
-            .paragraph(&paragraph_id)
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(error)
+    #[napi(ts_return_type = "Promise<any>")]
+    pub fn footers(&self) -> Result<AsyncTask<PendingTask<JsonValue>>> {
+        self.worker.submit(|document| {
+            serde_json::to_value(document.footers())
+                .map(JsonValue)
+                .map_err(error)
+        })
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<any>")]
+    pub fn sections(&self) -> Result<AsyncTask<PendingTask<JsonValue>>> {
+        self.worker.submit(|document| {
+            serde_json::to_value(document.sections())
+                .map(JsonValue)
+                .map_err(error)
+        })
+    }
+
+    #[napi(ts_return_type = "Promise<any>")]
+    pub fn paragraphs(&self) -> Result<AsyncTask<PendingTask<JsonValue>>> {
+        self.worker.submit(|document| {
+            serde_json::to_value(document.paragraphs())
+                .map(JsonValue)
+                .map_err(error)
+        })
+    }
+
+    #[napi(ts_return_type = "Promise<any>")]
+    pub fn tables(&self) -> Result<AsyncTask<PendingTask<JsonValue>>> {
+        self.worker.submit(|document| {
+            serde_json::to_value(document.tables())
+                .map(JsonValue)
+                .map_err(error)
+        })
+    }
+
+    #[napi(ts_return_type = "Promise<any | null>")]
+    pub fn paragraph(
+        &self,
+        paragraph_id: String,
+    ) -> Result<AsyncTask<PendingTask<Option<JsonValue>>>> {
+        self.worker.submit(move |document| {
+            document
+                .paragraph(&paragraph_id)
+                .map(serde_json::to_value)
+                .transpose()
+                .map(|value| value.map(JsonValue))
+                .map_err(error)
+        })
+    }
+
+    #[napi(ts_return_type = "Promise<EditReceipt>")]
     pub fn replace_paragraph_text(
         &self,
         paragraph_id: String,
         text: String,
-    ) -> Result<EditReceipt> {
+    ) -> Result<AsyncTask<PendingTask<EditReceipt>>> {
         let context = EditCtx {
             author: self.author.clone(),
             origin: self.origin,
             suggesting: None,
             now_iso: self.timestamp.clone(),
         };
-        let receipt = lock(&self.inner)?
-            .replace_paragraph_text_with(&paragraph_id, &text, 1, &context)
-            .map_err(error)?;
-        let range = receipt.range;
-        Ok(EditReceipt {
-            paragraph_id: range.as_ref().map(|value| value.start.para.clone()),
-            story: range.as_ref().map(|value| value.start.story.clone()),
-            start: range.as_ref().map(|value| value.start.offset),
-            end: range.as_ref().map(|value| value.end.offset),
-            new_paragraph_ids: receipt.new_para_ids,
-            revision_ids: receipt.revision_ids,
+        self.worker.submit(move |document| {
+            let receipt = document
+                .replace_paragraph_text_with(&paragraph_id, &text, 1, &context)
+                .map_err(error)?;
+            let range = receipt.range;
+            Ok(EditReceipt {
+                paragraph_id: range.as_ref().map(|value| value.start.para.clone()),
+                story: range.as_ref().map(|value| value.start.story.clone()),
+                start: range.as_ref().map(|value| value.start.offset),
+                end: range.as_ref().map(|value| value.end.offset),
+                new_paragraph_ids: receipt.new_para_ids,
+                revision_ids: receipt.revision_ids,
+            })
         })
     }
 
     #[napi(ts_return_type = "Promise<LayoutResult>")]
-    pub fn layout(&self, input: serde_json::Value) -> Result<AsyncTask<LayoutTask>> {
+    pub fn layout(&self, input: serde_json::Value) -> Result<AsyncTask<PendingTask<LayoutResult>>> {
         let input = serde_json::from_value(input).map_err(error)?;
-        Ok(AsyncTask::new(LayoutTask {
-            document: self.inner.clone(),
-            input,
-        }))
+        self.worker.submit(move |document| {
+            let result = document.layout(input).map_err(error)?;
+            Ok(LayoutResult {
+                layout: serde_json::to_value(result.layout).map_err(error)?,
+                display_list: serde_json::to_value(result.display_list).map_err(error)?,
+            })
+        })
     }
 
-    #[napi]
-    pub fn register_font(&self, face: FontFace) -> Result<u32> {
-        lock(&self.inner)?
-            .register_font(
-                &face.family,
-                face.bold.unwrap_or(false),
-                face.italic.unwrap_or(false),
-                &face.data,
-            )
-            .map_err(error)
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn register_font(&self, face: FontFace) -> Result<AsyncTask<PendingTask<u32>>> {
+        let data = face.data.to_vec();
+        self.worker.submit(move |document| {
+            document
+                .register_font(
+                    &face.family,
+                    face.bold.unwrap_or(false),
+                    face.italic.unwrap_or(false),
+                    &data,
+                )
+                .map_err(error)
+        })
     }
 
-    #[napi]
-    pub fn register_image(&self, image: ImageResource) -> Result<()> {
-        let scope = image.scope.as_deref().unwrap_or("body");
-        let scope = match scope {
-            "body" => ImageScope::Body,
-            "headerFooter" => ImageScope::HeaderFooter(
-                image
-                    .part
-                    .as_deref()
-                    .ok_or_else(|| error("headerFooter images require part"))?,
-            ),
-            "footnotes" => ImageScope::Notes(NoteKind::Footnote),
-            "endnotes" => ImageScope::Notes(NoteKind::Endnote),
-            _ => {
-                return Err(error(
-                    "scope must be body, headerFooter, footnotes, or endnotes",
-                ));
-            }
-        };
-        lock(&self.inner)?
-            .register_image(scope, &image.relationship_id, &image.data)
-            .map_err(error)
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn register_image(&self, image: ImageResource) -> Result<AsyncTask<PendingTask<()>>> {
+        let data = image.data.to_vec();
+        self.worker.submit(move |document| {
+            let scope = match image.scope.as_deref().unwrap_or("body") {
+                "body" => ImageScope::Body,
+                "headerFooter" => ImageScope::HeaderFooter(
+                    image
+                        .part
+                        .as_deref()
+                        .ok_or_else(|| error("headerFooter images require part"))?,
+                ),
+                "footnotes" => ImageScope::Notes(NoteKind::Footnote),
+                "endnotes" => ImageScope::Notes(NoteKind::Endnote),
+                _ => {
+                    return Err(error(
+                        "scope must be body, headerFooter, footnotes, or endnotes",
+                    ));
+                }
+            };
+            document
+                .register_image(scope, &image.relationship_id, &data)
+                .map_err(error)
+        })
     }
 
     #[napi(ts_return_type = "Promise<RenderedPage>")]
@@ -395,29 +442,39 @@ impl DocxDocument {
         &self,
         display_list: serde_json::Value,
         page: Option<u32>,
-    ) -> Result<AsyncTask<RenderTask>> {
-        Ok(AsyncTask::new(RenderTask {
-            document: self.inner.clone(),
-            display_list: serde_json::from_value(display_list).map_err(error)?,
-            page: page.unwrap_or(0) as usize,
-        }))
+    ) -> Result<AsyncTask<PendingTask<RenderedPage>>> {
+        let display_list = serde_json::from_value(display_list).map_err(error)?;
+        let page = page.unwrap_or(0) as usize;
+        self.worker.submit(move |document| {
+            let rendered = document.render_png(&display_list, page).map_err(error)?;
+            Ok(RenderedPage {
+                data: rendered.bytes.into(),
+                skipped_images: rendered.skipped_images as u32,
+            })
+        })
     }
 
     #[napi(ts_return_type = "Promise<Buffer>")]
-    pub fn save(&self, options: Option<SaveDocumentOptions>) -> Result<AsyncTask<SaveTask>> {
+    pub fn save(
+        &self,
+        options: Option<SaveDocumentOptions>,
+    ) -> Result<AsyncTask<PendingTask<Buffer>>> {
         let options = options.unwrap_or(SaveDocumentOptions {
             timestamp: None,
             update_modified_date: None,
             modified_by: None,
         });
-        Ok(AsyncTask::new(SaveTask {
-            document: self.inner.clone(),
-            options: SaveOptions {
-                now: options.timestamp.unwrap_or_else(|| self.timestamp.clone()),
-                update_modified_date: options.update_modified_date.unwrap_or(false),
-                modified_by: options.modified_by,
-            },
-        }))
+        let options = SaveOptions {
+            now: options.timestamp.unwrap_or_else(|| self.timestamp.clone()),
+            update_modified_date: options.update_modified_date.unwrap_or(false),
+            modified_by: options.modified_by,
+        };
+        self.worker.submit(move |document| {
+            document
+                .save_with_options(options)
+                .map(Buffer::from)
+                .map_err(error)
+        })
     }
 }
 

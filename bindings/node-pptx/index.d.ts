@@ -6,58 +6,58 @@ export declare class Presentation {
   get origin(): string
   set origin(value: string)
   get collaborative(): boolean
-  get clientId(): number
-  snapshot(): any
-  get slideCount(): number
-  get slideIds(): Array<string>
-  get widthEmu(): number
-  get heightEmu(): number
-  slide(slide: number): any
-  story(storyId: string): any
-  layouts(): any
-  media(): Array<MediaResource>
-  insertSlide(index: number, layout?: string | undefined | null): any
-  deleteSlide(slideId: string): any
-  moveSlide(slideId: string, index: number): any
-  setSlideNotes(slideId: string, text: string): void
-  addTextBox(slideId: string, draft: any): any
-  addShape(slideId: string, draft: any): any
-  removeShape(slideId: string, shapeId: string): any
-  setShapeFill(slideId: string, shapeId: string, color?: string | undefined | null): any
-  setShapeStroke(slideId: string, shapeId: string, stroke: any): any
-  setShapeAdjust(slideId: string, shapeId: string, adjustments: any): any
-  moveShape(slideId: string, shapeId: string, x: number, y: number): any
-  resizeShape(slideId: string, shapeId: string, width: number, height: number): any
-  setShapeRect(slideId: string, shapeId: string, rect: any): any
-  insertText(storyId: string, index: number, text: string, style?: any | undefined | null): any
-  deleteText(storyId: string, start: number, end: number): any
-  formatText(storyId: string, start: number, end: number, patch: any): any
-  setParagraphAlignment(storyId: string, start: number, end: number, alignment?: string | undefined | null): any
-  insertParagraphBreak(storyId: string, index: number): any
-  deleteParagraphBreak(storyId: string, index: number): any
-  addComment(comment: CommentInput): any
-  replyToComment(reply: CommentReplyInput): any
-  setCommentStatus(commentId: string, resolved?: boolean | undefined | null): any
-  removeComment(commentId: string): any
-  get comments(): any
-  get commentFlavor(): string
-  setCommentFlavor(flavor: string): string
-  registerFont(face: FontFace): number
+  get clientId(): Promise<number>
+  snapshot(): Promise<any>
+  get slideCount(): Promise<number>
+  get slideIds(): Promise<string[]>
+  get widthEmu(): Promise<number>
+  get heightEmu(): Promise<number>
+  slide(slide: number): Promise<any>
+  story(storyId: string): Promise<any>
+  layouts(): Promise<any>
+  media(): Promise<MediaResource[]>
+  insertSlide(index: number, layout?: string | undefined | null): Promise<any>
+  deleteSlide(slideId: string): Promise<any>
+  moveSlide(slideId: string, index: number): Promise<any>
+  setSlideNotes(slideId: string, text: string): Promise<void>
+  addTextBox(slideId: string, draft: any): Promise<any>
+  addShape(slideId: string, draft: any): Promise<any>
+  removeShape(slideId: string, shapeId: string): Promise<any>
+  setShapeFill(slideId: string, shapeId: string, color?: string | undefined | null): Promise<any>
+  setShapeStroke(slideId: string, shapeId: string, stroke: any): Promise<any>
+  setShapeAdjust(slideId: string, shapeId: string, adjustments: any): Promise<any>
+  moveShape(slideId: string, shapeId: string, x: number, y: number): Promise<any>
+  resizeShape(slideId: string, shapeId: string, width: number, height: number): Promise<any>
+  setShapeRect(slideId: string, shapeId: string, rect: any): Promise<any>
+  insertText(storyId: string, index: number, text: string, style?: any | undefined | null): Promise<any>
+  deleteText(storyId: string, start: number, end: number): Promise<any>
+  formatText(storyId: string, start: number, end: number, patch: any): Promise<any>
+  setParagraphAlignment(storyId: string, start: number, end: number, alignment?: string | undefined | null): Promise<any>
+  insertParagraphBreak(storyId: string, index: number): Promise<any>
+  deleteParagraphBreak(storyId: string, index: number): Promise<any>
+  addComment(comment: CommentInput): Promise<any>
+  replyToComment(reply: CommentReplyInput): Promise<any>
+  setCommentStatus(commentId: string, resolved?: boolean | undefined | null): Promise<any>
+  removeComment(commentId: string): Promise<any>
+  get comments(): Promise<any>
+  get commentFlavor(): Promise<string>
+  setCommentFlavor(flavor: string): Promise<string>
+  registerFont(face: FontFace): Promise<number>
   renderSlide(slide: number, options?: RenderSlideOptions | undefined | null): Promise<RenderedSlide>
-  encodeStateVector(): Buffer
-  encodeStateAsUpdate(): Buffer
-  encodeDiff(stateVector: Buffer): Buffer
-  applyUpdate(update: Buffer): any
-  propose(request: any): any
-  get proposals(): any
-  previewProposal(proposalId: string): any
-  acceptProposal(proposalId: string, force?: boolean | undefined | null): any
-  rejectProposal(proposalId: string): boolean
-  get canUndo(): boolean
-  get canRedo(): boolean
-  undo(): boolean
-  redo(): boolean
-  addUndoBarrier(): void
+  encodeStateVector(): Promise<Buffer>
+  encodeStateAsUpdate(): Promise<Buffer>
+  encodeDiff(stateVector: Buffer): Promise<Buffer>
+  applyUpdate(update: Buffer): Promise<any>
+  propose(request: any): Promise<any>
+  get proposals(): Promise<any>
+  previewProposal(proposalId: string): Promise<any>
+  acceptProposal(proposalId: string, force?: boolean | undefined | null): Promise<any>
+  rejectProposal(proposalId: string): Promise<boolean>
+  get canUndo(): Promise<boolean>
+  get canRedo(): Promise<boolean>
+  undo(): Promise<boolean>
+  redo(): Promise<boolean>
+  addUndoBarrier(): Promise<void>
   save(): Promise<Buffer>
 }
 export type PptxPresentation = Presentation

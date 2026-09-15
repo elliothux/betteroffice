@@ -7,22 +7,22 @@ export declare class Document {
   set origin(value: string)
   get timestamp(): string
   set timestamp(timestamp: string)
-  get paragraphIds(): Array<string | undefined | null>
-  get warnings(): Array<string>
-  get templateVariables(): Array<string>
-  get text(): string
-  get structure(): DocumentStructure
-  body(): any
-  headers(): any
-  footers(): any
-  sections(): any
-  paragraphs(): any
-  tables(): any
-  paragraph(paragraphId: string): any | null
-  replaceParagraphText(paragraphId: string, text: string): EditReceipt
+  get paragraphIds(): Promise<Array<string | null>>
+  get warnings(): Promise<string[]>
+  get templateVariables(): Promise<string[]>
+  get text(): Promise<string>
+  get structure(): Promise<DocumentStructure>
+  body(): Promise<any>
+  headers(): Promise<any>
+  footers(): Promise<any>
+  sections(): Promise<any>
+  paragraphs(): Promise<any>
+  tables(): Promise<any>
+  paragraph(paragraphId: string): Promise<any | null>
+  replaceParagraphText(paragraphId: string, text: string): Promise<EditReceipt>
   layout(input: any): Promise<LayoutResult>
-  registerFont(face: FontFace): number
-  registerImage(image: ImageResource): void
+  registerFont(face: FontFace): Promise<number>
+  registerImage(image: ImageResource): Promise<void>
   renderPage(displayList: any, page?: number | undefined | null): Promise<RenderedPage>
   save(options?: SaveDocumentOptions | undefined | null): Promise<Buffer>
 }

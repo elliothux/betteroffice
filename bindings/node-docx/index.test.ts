@@ -23,12 +23,16 @@ describe('@betteroffice/docx-node', () => {
   test('opens, inspects, lays out, renders, and saves a document', async () => {
     const document = await openDocument(fixture, { author: 'Node test' });
 
-    expect(document.structure.bodyParagraphs).toBeGreaterThan(0);
+    const structure = await document.structure;
+    const paragraphIds = await document.paragraphIds;
+    const text = await document.text;
+
+    expect(structure.bodyParagraphs).toBeGreaterThan(0);
     expect(document.author).toBe('Node test');
-    expect(document.paragraphIds).toHaveLength(document.structure.bodyParagraphs);
-    expect(document.text.length).toBeGreaterThan(0);
+    expect(paragraphIds).toHaveLength(structure.bodyParagraphs);
+    expect(text.length).toBeGreaterThan(0);
     const layout = await document.layout(layoutInput);
-    document.registerFont({ family: 'Calibri', data: font });
+    await document.registerFont({ family: 'Calibri', data: font });
     const rendered = await document.renderPage(layout.displayList);
 
     expect(rendered.data.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
