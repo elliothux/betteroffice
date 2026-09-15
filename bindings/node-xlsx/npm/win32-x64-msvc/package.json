@@ -1,0 +1,36 @@
+{
+  "name": "@betteroffice/xlsx-node-win32-x64-msvc",
+  "version": "0.0.1",
+  "cpu": [
+    "x64"
+  ],
+  "main": "betteroffice-xlsx-node.win32-x64-msvc.node",
+  "files": [
+    "betteroffice-xlsx-node.win32-x64-msvc.node"
+  ],
+  "description": "Native Node.js bindings for the BetterOffice XLSX engine.",
+  "keywords": [
+    "xlsx",
+    "excel",
+    "spreadsheet",
+    "ooxml",
+    "node-api",
+    "rust"
+  ],
+  "homepage": "https://betteroffice.dev/",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "bindings/node-xlsx"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "win32"
+  ]
+}

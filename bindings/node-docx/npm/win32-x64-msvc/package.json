@@ -1,0 +1,35 @@
+{
+  "name": "@betteroffice/docx-node-win32-x64-msvc",
+  "version": "0.0.1",
+  "cpu": [
+    "x64"
+  ],
+  "main": "betteroffice-docx-node.win32-x64-msvc.node",
+  "files": [
+    "betteroffice-docx-node.win32-x64-msvc.node"
+  ],
+  "description": "Native Node.js bindings for the BetterOffice DOCX engine.",
+  "keywords": [
+    "docx",
+    "word",
+    "ooxml",
+    "node-api",
+    "rust"
+  ],
+  "homepage": "https://betteroffice.dev/",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "bindings/node-docx"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "win32"
+  ]
+}
