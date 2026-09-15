@@ -68,6 +68,12 @@ function bitmapMetafile(bitmap = bitmapRecord(), extras: Uint8Array[] = [], plac
 }
 
 describe('presentation image blobs', () => {
+  test('rejects oversized TIFF media before transferring it to Wasm', () => {
+    const bytes = new Uint8Array(32 * 1024 * 1024 + 1);
+    bytes.set([0x49, 0x49, 0x2a, 0]);
+    expect(() => presentationImageBlob(bytes)).toThrow('TIFF image exceeds the browser transfer budget');
+  });
+
   test('transcodes TIFF media from a presentation to PNG', async () => {
     const [wasm, pptx] = await Promise.all([
       readFile(resolve(import.meta.dir, '../wasm/generated/pptx_wasm_bg.wasm')),

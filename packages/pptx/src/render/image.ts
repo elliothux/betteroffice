@@ -1,10 +1,14 @@
 import { decodeTiffImage } from '../wasm/loader';
 
 const MAX_BITMAP_PIXELS = 33_554_432;
+const MAX_TIFF_BYTES = 32 * 1024 * 1024;
 
 /** Convert presentation image formats that browsers cannot decode. */
 export function presentationImageBlob(bytes: Uint8Array): Blob {
   if (isTiff(bytes)) {
+    if (bytes.byteLength > MAX_TIFF_BYTES) {
+      throw new Error('TIFF image exceeds the browser transfer budget');
+    }
     return new Blob([decodeTiffImage(bytes).slice()], { type: 'image/png' });
   }
   const bitmap = wmfBitmap(bytes);

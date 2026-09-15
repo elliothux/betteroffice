@@ -8,6 +8,7 @@ pub use pptx_edit::wasm::PptxDocument;
 
 const MAX_IMAGE_PIXELS: u64 = 33_554_432;
 const MAX_IMAGE_BYTES: u64 = 268_435_456;
+const MAX_TIFF_BYTES: u64 = 32 * 1024 * 1024;
 
 #[wasm_bindgen]
 pub struct PptxRenderer {
@@ -139,6 +140,10 @@ pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
 fn decode_tiff(data: &[u8]) -> Result<Vec<u8>, String> {
     use image::{ImageDecoder as _, ImageEncoder as _};
 
+    let source_bytes = data.len() as u64;
+    if !image_fits_budget(0, 0, source_bytes) {
+        return Err("TIFF image exceeds the browser decode budget".to_owned());
+    }
     let mut decoder = image::ImageReader::with_format(Cursor::new(data), image::ImageFormat::Tiff)
         .into_decoder()
         .map_err(|error| error.to_string())?;
@@ -147,7 +152,7 @@ fn decode_tiff(data: &[u8]) -> Result<Vec<u8>, String> {
     let bytes = decoder
         .total_bytes()
         .saturating_add(pixels.saturating_mul(4));
-    if !image_fits_budget(pixels, bytes) {
+    if !image_fits_budget(pixels, bytes, source_bytes) {
         return Err("TIFF image exceeds the browser decode budget".to_owned());
     }
     let orientation = decoder.orientation().map_err(|error| error.to_string())?;
@@ -167,8 +172,10 @@ fn decode_tiff(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(png)
 }
 
-fn image_fits_budget(pixels: u64, bytes: u64) -> bool {
-    pixels <= MAX_IMAGE_PIXELS && bytes <= MAX_IMAGE_BYTES
+fn image_fits_budget(pixels: u64, decoded_bytes: u64, source_bytes: u64) -> bool {
+    pixels <= MAX_IMAGE_PIXELS
+        && source_bytes <= MAX_TIFF_BYTES
+        && source_bytes.saturating_add(decoded_bytes) <= MAX_IMAGE_BYTES
 }
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
@@ -206,7 +213,9 @@ mod tests {
 
     #[test]
     fn rejects_images_past_the_decode_budget() {
-        assert!(!image_fits_budget(MAX_IMAGE_PIXELS + 1, 0));
-        assert!(!image_fits_budget(0, MAX_IMAGE_BYTES + 1));
+        assert!(!image_fits_budget(MAX_IMAGE_PIXELS + 1, 0, 0));
+        assert!(!image_fits_budget(0, MAX_IMAGE_BYTES + 1, 0));
+        assert!(!image_fits_budget(0, 0, MAX_TIFF_BYTES + 1));
+        assert!(!image_fits_budget(0, MAX_IMAGE_BYTES, 1));
     }
 }
