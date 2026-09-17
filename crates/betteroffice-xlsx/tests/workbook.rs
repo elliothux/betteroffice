@@ -20,6 +20,59 @@ fn cell(address: &str) -> CellRef {
 }
 
 #[test]
+fn text_search_uses_formatted_values_and_stable_cell_order() {
+    let mut first = Sheet::new("Data");
+    first.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Text {
+                value: "Alpha alpha".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    first.set_cell(
+        cell("A2"),
+        Cell {
+            value: CellValue::Number { value: 0.25 },
+            ..Cell::default()
+        },
+    );
+    let mut second = Sheet::new("Later");
+    second.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Text {
+                value: "ALPHA".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    let model = WorkbookModel {
+        sheets: vec![first, second],
+        ..Default::default()
+    };
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook
+        .set_range_number_format(
+            SheetId(0),
+            CellRange::new(cell("A2"), cell("A2")),
+            NumberFormatMutation::Percent,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let matches = workbook.search_text("alpha", false, None);
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0].address.cell, cell("B1"));
+    assert_eq!(matches[1].address.sheet, SheetId(1));
+    assert_eq!(workbook.search_text("Alpha", true, None).len(), 1);
+    assert_eq!(workbook.search_text("alpha", false, Some(1)), &matches[..1]);
+    assert_eq!(workbook.search_text("25", false, None)[0].text, "25.00%");
+    assert!(workbook.search_text("", false, None).is_empty());
+}
+
+#[test]
 fn indexed_palette_colors_reach_rendering_selection_sync_and_save() {
     let mut model = WorkbookModel::default();
     model.styles.indexed_colors = vec!["#123456".into(), "#5e88b1".into(), "#99cc00".into()];

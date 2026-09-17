@@ -62,6 +62,50 @@ describe('wasm loader', () => {
     }
   });
 
+  it('searches formatted cell text without changing workbook state', () => {
+    const handle = openWorkbook(sampleBytes());
+    try {
+      handle.editCell(0, 20, 1, 'QueryNeedle');
+      handle.editCell(1, 0, 0, 'queryneedle');
+      handle.editCell(2, 4, 2, '0.25');
+      handle.setNumberFormat(2, 'C5', 'percent');
+      const before = handle.encodeStateVector();
+
+      expect(handle.searchText('queryneedle')).toEqual([
+        {
+          sheet: 0,
+          sheetId: 'sheet:0',
+          sheetName: 'Budget',
+          row: 20,
+          col: 1,
+          a1: 'B21',
+          text: 'QueryNeedle',
+        },
+        {
+          sheet: 1,
+          sheetId: 'sheet:1',
+          sheetName: 'Summary',
+          row: 0,
+          col: 0,
+          a1: 'A1',
+          text: 'queryneedle',
+        },
+      ]);
+      expect(handle.searchText('QueryNeedle', { caseSensitive: true })).toHaveLength(1);
+      expect(handle.searchText('queryneedle', { limit: 1 })).toHaveLength(1);
+      expect(handle.searchText('25.00%')[0]).toMatchObject({
+        sheet: 2,
+        a1: 'C5',
+        text: '25.00%',
+      });
+      expect(handle.searchText('')).toEqual([]);
+      expect(() => handle.searchText('queryneedle', { limit: -1 })).toThrow(RangeError);
+      expect(handle.encodeStateVector()).toEqual(before);
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('renders a display list with real commands', () => {
     const handle = openWorkbook(sampleBytes());
     try {

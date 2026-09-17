@@ -37,7 +37,7 @@ use crate::sheet_json::{
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, Error, HistoryState,
     MutationResult, NumberFormatKind, ProposalAcceptance, ProposalRequest, Result,
-    SelectionFormatting, SheetInfo, UpdateEvent, UpdateOrigin,
+    SelectionFormatting, SheetInfo, TextSearchMatch, UpdateEvent, UpdateOrigin,
 };
 #[cfg(feature = "raster")]
 use crate::{RenderOptions, RenderedPng};
@@ -795,6 +795,44 @@ impl Workbook {
             input,
             is_formula,
         })
+    }
+
+    /// Find cells whose formatted display text contains `query`, in sheet and
+    /// row-major cell order. This query never changes workbook state.
+    pub fn search_text(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        limit: Option<usize>,
+    ) -> Vec<TextSearchMatch> {
+        if query.is_empty() || limit == Some(0) {
+            return Vec::new();
+        }
+        let folded_query = (!case_sensitive).then(|| query.to_lowercase());
+        let mut matches = Vec::new();
+        for (sheet_index, sheet) in self.model.sheets.iter().enumerate() {
+            for (cell_ref, cell) in sheet.iter_cells() {
+                let text = display_text(&self.model.styles, self.model.date_system, cell);
+                let found = match &folded_query {
+                    Some(needle) => text.to_lowercase().contains(needle),
+                    None => text.contains(query),
+                };
+                if !found {
+                    continue;
+                }
+                matches.push(TextSearchMatch {
+                    address: CellAddress {
+                        sheet: SheetId(sheet_index as u32),
+                        cell: cell_ref,
+                    },
+                    text,
+                });
+                if matches.len() == limit.unwrap_or(usize::MAX) {
+                    return matches;
+                }
+            }
+        }
+        matches
     }
 
     pub fn range_cells(&self, sheet: SheetId, range: CellRange) -> Result<Vec<Vec<CellEdit>>> {

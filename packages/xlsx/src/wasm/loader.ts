@@ -203,6 +203,25 @@ export interface CellEdit {
   isFormula: boolean;
 }
 
+export interface XlsxTextSearchOptions {
+  /** Match letter case. Defaults to false. */
+  caseSensitive?: boolean;
+  /** Stop after this many matching cells. Omit to return every match. */
+  limit?: number;
+}
+
+/** One matching cell, addressed in zero-based sheet, row, and column coordinates. */
+export interface XlsxTextMatch {
+  sheet: number;
+  sheetId: string;
+  sheetName: string;
+  row: number;
+  col: number;
+  a1: string;
+  /** The formatted text visible in the grid. */
+  text: string;
+}
+
 /** One cell of a batch edit: target coordinates plus the raw user input. */
 export interface CellInputEdit {
   row: number;
@@ -328,6 +347,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   redo(): EditResult;
   /** the editable view of one cell (formula bar / in-cell editor prefill). */
   cell(sheet: number, row: number, col: number): CellEdit;
+  /** Find cells by their formatted display text in deterministic workbook order. */
+  searchText(query: string, options?: XlsxTextSearchOptions): XlsxTextMatch[];
   cellPosition(sheet: number, row: number, col: number): CellPosition;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
@@ -633,6 +654,25 @@ export function openWorkbook(
     },
     cell(sheet: number, row: number, col: number): CellEdit {
       return parseJson(() => doc.cellJson(JSON.stringify({ sheet, row, col })));
+    },
+    searchText(query, options): XlsxTextMatch[] {
+      if (!query) return [];
+      const limit = options?.limit;
+      if (
+        limit !== undefined &&
+        (!Number.isSafeInteger(limit) || limit < 0 || limit > 0xffff_ffff)
+      ) {
+        throw new RangeError('search limit must be an unsigned 32-bit integer');
+      }
+      return parseJson(() =>
+        doc.searchTextJson(
+          JSON.stringify({
+            query,
+            caseSensitive: options?.caseSensitive ?? false,
+            ...(limit === undefined ? {} : { limit }),
+          })
+        )
+      );
     },
     cellPosition(sheet: number, row: number, col: number): CellPosition {
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));
