@@ -101,9 +101,6 @@ export class XlsxDocument {
      * serialize the current workbook back to `.xlsx` bytes.
      */
     saveBytes(): Uint8Array;
-    /**
-     * Cells whose formatted display text contains the literal query.
-     */
     searchTextJson(args: string): string;
     selectionFormattingJson(args: string): string;
     /**

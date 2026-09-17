@@ -293,7 +293,6 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
-    /// Cells whose formatted display text contains the literal query.
     #[wasm_bindgen(js_name = searchTextJson)]
     pub fn search_text_json(&self, args: &str) -> Result<String, JsValue> {
         self.session

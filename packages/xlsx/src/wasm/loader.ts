@@ -204,13 +204,13 @@ export interface CellEdit {
 }
 
 export interface XlsxTextSearchOptions {
-  /** Match letter case. Defaults to false. */
+  /** Defaults to false. */
   caseSensitive?: boolean;
-  /** Stop after this many matching cells. Defaults to 1000. */
+  /** Maximum matches; defaults to 1000. */
   limit?: number;
 }
 
-/** One matching cell, addressed in zero-based sheet, row, and column coordinates. */
+/** Zero-based sheet, row, and column. */
 export interface XlsxTextMatch {
   sheet: number;
   sheetId: string;
@@ -218,7 +218,7 @@ export interface XlsxTextMatch {
   row: number;
   col: number;
   a1: string;
-  /** The formatted text visible in the grid. */
+  /** Formatted display text. */
   text: string;
 }
 
@@ -347,7 +347,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   redo(): EditResult;
   /** the editable view of one cell (formula bar / in-cell editor prefill). */
   cell(sheet: number, row: number, col: number): CellEdit;
-  /** Find cells by their formatted display text in deterministic workbook order. */
+  /** Searches formatted text in sheet and row order. */
   searchText(query: string, options?: XlsxTextSearchOptions): XlsxTextMatch[];
   cellPosition(sheet: number, row: number, col: number): CellPosition;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */

@@ -798,9 +798,8 @@ impl Workbook {
         })
     }
 
-    /// Find cells whose formatted display text contains `query`, in sheet and
-    /// row-major cell order. This query never changes workbook state. An omitted
-    /// limit returns at most [`DEFAULT_TEXT_SEARCH_LIMIT`] matches.
+    /// Searches formatted cell text in sheet and row order.
+    /// Defaults to [`DEFAULT_TEXT_SEARCH_LIMIT`] matches.
     pub fn search_text(
         &self,
         query: &str,
