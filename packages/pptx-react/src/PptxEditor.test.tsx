@@ -261,7 +261,9 @@ describe('PptxEditor viewing transitions', () => {
     const view = render(
       <PptxEditor {...props} initialSlide={Number.MAX_SAFE_INTEGER} readOnly />
     );
-    await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
+    await act(async () => {
+      await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
+    });
     const api = opened[0];
     const before = api.handle.snapshot();
     const last = before.slides.length;
