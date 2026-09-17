@@ -43,6 +43,7 @@ use crate::{
 use crate::{RenderOptions, RenderedPng};
 
 const MAX_RANGE_CELLS: u64 = 100_000;
+pub const DEFAULT_TEXT_SEARCH_LIMIT: usize = 1_000;
 const MAX_COL_WIDTH: f64 = 255.0;
 const MAX_ROW_HEIGHT: f64 = 409.5;
 /// Maximum accepted encoded update or state-vector size: 64 MiB.
@@ -798,7 +799,8 @@ impl Workbook {
     }
 
     /// Find cells whose formatted display text contains `query`, in sheet and
-    /// row-major cell order. This query never changes workbook state.
+    /// row-major cell order. This query never changes workbook state. An omitted
+    /// limit returns at most [`DEFAULT_TEXT_SEARCH_LIMIT`] matches.
     pub fn search_text(
         &self,
         query: &str,
@@ -808,6 +810,7 @@ impl Workbook {
         if query.is_empty() || limit == Some(0) {
             return Vec::new();
         }
+        let limit = limit.unwrap_or(DEFAULT_TEXT_SEARCH_LIMIT);
         let folded_query = (!case_sensitive).then(|| query.to_lowercase());
         let mut matches = Vec::new();
         for (sheet_index, sheet) in self.model.sheets.iter().enumerate() {
@@ -827,7 +830,7 @@ impl Workbook {
                     },
                     text,
                 });
-                if matches.len() == limit.unwrap_or(usize::MAX) {
+                if matches.len() == limit {
                     return matches;
                 }
             }

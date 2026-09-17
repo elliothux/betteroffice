@@ -84,7 +84,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/xlsx",
-    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine.",
+    desc: "Framework-free spreadsheet core — parsing, formatted cell text search, calculation and rendering on the Rust engine.",
   },
   {
     name: "@betteroffice/xlsx-react",

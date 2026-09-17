@@ -2,8 +2,8 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
-    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, DefinedName, DrawCmd,
-    Error, FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES,
+    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, DEFAULT_TEXT_SEARCH_LIMIT,
+    DefinedName, DrawCmd, Error, FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES,
     MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS,
     NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet,
     SheetChart, SheetId, StylePatch, UpdateOrigin, Viewport, Workbook, WorkbookModel,
@@ -70,6 +70,38 @@ fn text_search_uses_formatted_values_and_stable_cell_order() {
     assert_eq!(workbook.search_text("alpha", false, Some(1)), &matches[..1]);
     assert_eq!(workbook.search_text("25", false, None)[0].text, "25.00%");
     assert!(workbook.search_text("", false, None).is_empty());
+}
+
+#[test]
+fn text_search_has_a_bounded_default_that_callers_can_override() {
+    let mut sheet = Sheet::new("Data");
+    for row in 0..=DEFAULT_TEXT_SEARCH_LIMIT as u32 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "match".into(),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert_eq!(
+        workbook.search_text("match", false, None).len(),
+        DEFAULT_TEXT_SEARCH_LIMIT
+    );
+    assert_eq!(
+        workbook
+            .search_text("match", false, Some(DEFAULT_TEXT_SEARCH_LIMIT + 1))
+            .len(),
+        DEFAULT_TEXT_SEARCH_LIMIT + 1
+    );
 }
 
 #[test]

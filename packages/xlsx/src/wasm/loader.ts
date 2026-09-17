@@ -206,7 +206,7 @@ export interface CellEdit {
 export interface XlsxTextSearchOptions {
   /** Match letter case. Defaults to false. */
   caseSensitive?: boolean;
-  /** Stop after this many matching cells. Omit to return every match. */
+  /** Stop after this many matching cells. Defaults to 1000. */
   limit?: number;
 }
 
