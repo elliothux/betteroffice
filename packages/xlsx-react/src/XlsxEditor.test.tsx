@@ -1062,5 +1062,31 @@ describe('XlsxEditor pending host edits', () => {
       });
     }
   }
+  it('commits the next cell edit on blur after a host save', async () => {
+    let api: XlsxEditorApi | undefined;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const target = { row: 2, col: 0 };
+    await act(async () => {
+      api!.selectCells(0, selectionAt(target));
+    });
+    fireEvent.change(view.getByTestId('xlsx-formula-input'), {
+      target: { value: 'First draft' },
+    });
+    await act(async () => {
+      api!.save();
+    });
+    fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
+    const editor = view.getByTestId('xlsx-cell-editor');
+    fireEvent.change(editor, { target: { value: 'Second draft' } });
+    fireEvent.blur(editor);
+    expect(api!.handle.cell(0, target.row, target.col).input).toBe('Second draft');
+  });
 });
-

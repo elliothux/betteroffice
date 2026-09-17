@@ -931,6 +931,8 @@ function XlsxEditorContent({
       const result = handle.editCell(draft.sheet, draft.row, draft.col, draft.value);
       pendingDraftRef.current = null;
       suppressBlurRef.current = true;
+      editorInputRef.current?.blur();
+      suppressBlurRef.current = false;
       setEditing(null);
       setFormulaDraft(null);
       applyResult(result);
