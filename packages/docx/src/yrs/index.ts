@@ -198,6 +198,9 @@ export interface YrsParagraphAttrs {
   listMarkerHidden?: boolean | null;
   listMarkerFontFamily?: string | null;
   listMarkerFontSize?: number | null;
+  listMarkerBold?: boolean | null;
+  listMarkerItalic?: boolean | null;
+  listMarkerColor?: import('../types/colors').ColorValue | null;
   listMarkerSuffix?: 'tab' | 'space' | 'nothing' | null;
   listLevelNumFmts?: readonly string[] | null;
   listAbstractNumId?: number | null;
@@ -350,6 +353,8 @@ export type YrsRawOp =
 export interface YrsRenderEnv {
   tocStyleIds?: string[];
   paragraphSpacingLinePx?: number;
+  /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
+  docGridPitchPx?: number;
   defaultParagraphStyleId?: string;
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
   themeColors?: Record<string, string>;
