@@ -66,7 +66,7 @@ export interface PresentationHandle extends CollaborationReplica {
   readonly clientId: number;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
-  /** Find literal text across slide shape stories in deterministic deck order. */
+  /** Literal search in slide order. */
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
   layoutSlide(slideIndex: number): SlideDisplayList;

@@ -45,13 +45,13 @@ export interface StorySnapshot {
 }
 
 export interface PptxTextSearchOptions {
-  /** Match letter case. Defaults to false. */
+  /** Defaults to false. */
   caseSensitive?: boolean;
-  /** Stop after this many matches. Omit to return every match. */
+  /** Maximum matches; unlimited by default. */
   limit?: number;
 }
 
-/** One text-story match. Slide indexes and text offsets are zero-based. */
+/** Zero-based slide index; story-local UTF-16 offsets. */
 export interface PptxTextMatch {
   slideIndex: number;
   slideId: string;

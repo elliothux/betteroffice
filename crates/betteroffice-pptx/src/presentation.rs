@@ -118,7 +118,6 @@ impl Presentation {
         &self.package().media
     }
 
-    /// Searches editable text without changing the presentation.
     pub fn search_text(
         &self,
         query: &str,

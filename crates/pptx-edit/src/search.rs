@@ -10,7 +10,7 @@ use crate::deck::{
 };
 use crate::{DeckSession, EditError, EditResult, STORIES, story::snapshot_story};
 
-/// A literal match with story-local UTF-16 offsets.
+/// Story-local UTF-16 offsets.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextSearchMatch {
