@@ -12,7 +12,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { cellRect, initWasm, openWorkbook } from '@betteroffice/xlsx';
+import { cellRect, initWasm, openWorkbook, selectionAt } from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookHandle } from '@betteroffice/xlsx';
 import { XlsxEditor, type XlsxEditorApi } from './XlsxEditor';
 
@@ -752,6 +752,92 @@ describe('XlsxEditor chart objects', () => {
     // no invisible selection left swallowing the keyboard.
     await waitFor(() => expect(view.outline()).toBeNull());
     await waitFor(() => expect(view.selectionBox()).not.toBeNull());
+  });
+});
+
+describe('XlsxEditor host integration', () => {
+  it('keeps viewing mode navigable without exposing user mutations', async () => {
+    let api: XlsxEditorApi | undefined;
+    let changes = 0;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        onChange={() => changes++}
+        onReady={(ready) => {
+          api = ready;
+        }}
+        readOnly
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const surface = view.getByTestId('xlsx-scroll');
+    const target = { row: 2, col: 0 };
+    const before = api!.handle.cell(0, target.row, target.col).input;
+
+    fireEvent.doubleClick(surface, pointAt(plain, target));
+    fireEvent.keyDown(surface, { key: 'x' });
+    fireEvent.keyDown(surface, { key: 'Delete' });
+
+    expect(view.queryByTestId('xlsx-toolbar')).toBeNull();
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+    expect(api!.handle.cell(0, target.row, target.col).input).toBe(before);
+    expect(changes).toBe(0);
+
+    await act(async () => {
+      expect(api!.selectCells(0, selectionAt({ row: 3, col: 1 }))).toBe(true);
+    });
+    await waitFor(() => {
+      const selected = view.getByRole('gridcell', { selected: true });
+      expect(selected.textContent).toContain('B4');
+    });
+    await act(async () => api!.clearSelection());
+    await waitFor(() =>
+      expect(view.queryAllByRole('gridcell', { selected: true })).toHaveLength(0)
+    );
+    expect(api!.selectCells(99, selectionAt({ row: 0, col: 0 }))).toBe(false);
+  });
+
+  it('notifies on applied edits and saves through the host API', async () => {
+    let api: XlsxEditorApi | undefined;
+    let changes = 0;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        onChange={() => changes++}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const surface = view.getByTestId('xlsx-scroll');
+    const target = { row: 2, col: 0 };
+
+    await act(async () => {
+      expect(api!.selectCells(0, selectionAt(target))).toBe(true);
+    });
+    fireEvent.doubleClick(surface, pointAt(plain, target));
+    const editor = await waitFor(() => view.getByTestId('xlsx-cell-editor'));
+    fireEvent.change(editor, { target: { value: 'Host edit' } });
+    fireEvent.keyDown(editor, { key: 'Enter' });
+    expect(changes).toBe(1);
+
+    await act(async () => {
+      api!.selectCells(0, selectionAt({ row: 3, col: 1 }));
+      api!.clearSelection();
+    });
+    let saved!: Uint8Array;
+    await act(async () => {
+      saved = api!.save();
+    });
+    expect(changes).toBe(1);
+
+    const reopened = openWorkbook(saved);
+    try {
+      expect(reopened.cell(0, target.row, target.col).input).toBe('Host edit');
+    } finally {
+      reopened.dispose();
+    }
   });
 });
 
