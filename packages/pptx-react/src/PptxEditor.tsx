@@ -526,7 +526,7 @@ function PptxEditorContent({
       if (!shape?.textStories.some((story) => story.id === target.storyId)) return false;
       try {
         const story = handle.story(target.storyId);
-        if (target.end > Math.max(0, story.length - 1)) return false;
+        if (target.end > story.length) return false;
         clearSelection();
         if (!refreshAt(target.slide - 1)) return false;
         setSelection({

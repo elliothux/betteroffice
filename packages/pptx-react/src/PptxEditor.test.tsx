@@ -214,7 +214,7 @@ describe('PptxEditor host integration', () => {
     );
     const shape = snapshot.slides[0].shapes.find((candidate) => candidate.textStories.length > 0)!;
     const story = shape.textStories[0];
-    const end = Math.min(1, Math.max(0, api!.handle.story(story.id).length - 1));
+    const end = api!.handle.story(story.id).length;
     await act(async () => {
       expect(
         api!.selectText({
