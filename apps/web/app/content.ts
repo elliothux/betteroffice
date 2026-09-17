@@ -76,7 +76,7 @@ export const PACKAGES_SECTION = {
 export const PACKAGES = [
   {
     name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing, literal text search and page layout in Rust, compiled to WebAssembly. Standard legacy horizontal rules render and survive editing and saving. DrawingML plus shapes render with their authored adjustments. Elliptical pictures render with crops and borders. Other picture presets retain rectangular rendering; soft-edge effects are unsupported. Hidden content is omitted by default and can be revealed through the render options.",
+    desc: "Framework-free .docx core — parsing, CRDT editing and page layout in Rust, compiled to WebAssembly. Standard legacy horizontal rules render and survive editing and saving. DrawingML plus shapes render with their authored adjustments. Elliptical pictures render with crops and borders. Other picture presets retain rectangular rendering; soft-edge effects are unsupported. Hidden content is omitted by default and can be revealed through the render options.",
   },
   {
     name: "@betteroffice/docx-react",

@@ -7,7 +7,7 @@ use yrs::{Any, Map, ReadTxn, Transact};
 
 use crate::{EditingDoc, SegmentContent, read_state::table_cell_stories};
 
-/// A literal match with paragraph-local UTF-16 offsets.
+/// Paragraph-local UTF-16 offsets.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextSearchMatch {

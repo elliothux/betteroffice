@@ -150,13 +150,13 @@ export interface YrsParagraph {
 }
 
 export interface YrsTextSearchOptions {
-  /** Match letter case. Defaults to false. */
+  /** Defaults to false. */
   caseSensitive?: boolean;
-  /** Stop after this many matches. Omit to return every match. */
+  /** Maximum matches; unlimited by default. */
   limit?: number;
 }
 
-/** One paragraph-local text match in a story. Offsets are UTF-16 units. */
+/** Paragraph-local UTF-16 offsets. */
 export interface YrsTextMatch {
   story: string;
   paraId: string;
@@ -913,7 +913,7 @@ export interface YrsSession extends CollaborationReplica {
   yrsBlocksForStory(story: string, env?: YrsRenderEnv): unknown[];
   /** Paragraph snapshots in document order. */
   paragraphs(story: string): YrsParagraph[];
-  /** Find literal text in document order, including nested table cells. */
+  /** Literal search in document order. */
   searchText(query: string, options?: YrsTextSearchOptions): YrsTextMatch[];
   /** Paragraph ids and inline-unit lengths, resolved in one Rust story traversal. */
   paragraphSpans(story: string): YrsParagraphLength[];
