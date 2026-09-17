@@ -80,9 +80,8 @@ export interface XlsxEditorApi {
   focus: () => void;
   handle: WorkbookHandle;
   refreshProposals: () => void;
-  /** Serialize the workbook back to .xlsx bytes, edits included. */
   save: () => Uint8Array;
-  /** Select a range on a sheet and scroll its focus cell into view. */
+  /** Scrolls the focus cell into view. */
   selectCells: (sheet: number, selection: Selection) => boolean;
 }
 
@@ -120,7 +119,7 @@ export interface XlsxEditorProps {
    */
   onReady?: (api: XlsxEditorApi) => void | (() => void);
   className?: string;
-  /** Disable editing chrome and user mutations while retaining navigation and selection. */
+  /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
 }
 
