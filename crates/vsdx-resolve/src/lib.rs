@@ -2,6 +2,7 @@
 
 mod connectivity;
 mod containers;
+mod controls;
 mod geometry;
 mod inheritance;
 mod layers;
@@ -14,6 +15,7 @@ mod tests;
 
 pub use connectivity::*;
 pub use containers::*;
+pub use controls::*;
 pub use geometry::*;
 pub use inheritance::*;
 pub use layers::*;
