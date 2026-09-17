@@ -120,14 +120,14 @@ export interface PptxTextSelectionTarget {
 export interface PptxEditorApi {
   clearSelection: () => void;
   focus: () => void;
-  /** Navigate to a 1-based slide number. */
+  /** Accepts a 1-based slide number. */
   goToSlide: (slide: number) => boolean;
   handle: PresentationHandle;
   refresh: () => void;
   refreshProposals: () => void;
   /** Serialize the presentation back to .pptx bytes, edits included. */
   save: () => Uint8Array;
-  /** Select a text range and navigate to its slide. */
+  /** Also navigates to the slide. */
   selectText: (target: PptxTextSelectionTarget) => boolean;
 }
 
@@ -148,14 +148,14 @@ export interface PptxEditorProps {
   className?: string;
   /** Download name for the save button; falls back to `presentation.pptx`. */
   fileName?: string;
-  /** Initial 1-based slide number. Values outside the deck are clamped. */
+  /** 1-based; clamped to the deck. */
   initialSlide?: number;
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
   onError?: (error: Error) => void;
   /** Receives the saved bytes; without it, saving downloads the file. */
   onSave?: (bytes: Uint8Array) => void;
-  /** Disable user mutations while retaining viewing, navigation, and selection. */
+  /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
 }
 

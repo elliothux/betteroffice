@@ -96,7 +96,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/pptx-react",
-    desc: "The slides editor as a drop-in React component with host-controlled viewing and slide or text navigation.",
+    desc: "The slides editor as a drop-in React component.",
   },
 ];
 
