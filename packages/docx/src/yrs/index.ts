@@ -23,6 +23,7 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import { searchText } from './searchText';
 
 export * from './inputPositionMap';
 export {
@@ -147,6 +148,22 @@ export interface YrsParagraph {
   text: string;
   /** pStyle / alignment plus any op-set extras. */
   properties: Record<string, unknown>;
+}
+
+export interface YrsTextSearchOptions {
+  /** Match letter case. Defaults to false. */
+  caseSensitive?: boolean;
+  /** Stop after this many matches. Omit to return every match. */
+  limit?: number;
+}
+
+/** One paragraph-local text match in a story. Offsets are UTF-16 units. */
+export interface YrsTextMatch {
+  story: string;
+  paraId: string;
+  start: number;
+  end: number;
+  text: string;
 }
 
 /** One direct numbering reference (`w:numPr`) on a paragraph. */
@@ -892,6 +909,8 @@ export interface YrsSession extends CollaborationReplica {
   yrsBlocksForStory(story: string, env?: YrsRenderEnv): unknown[];
   /** Paragraph snapshots in document order. */
   paragraphs(story: string): YrsParagraph[];
+  /** Find literal text across every story in deterministic story and paragraph order. */
+  searchText(query: string, options?: YrsTextSearchOptions): YrsTextMatch[];
   /** Paragraph ids and inline-unit lengths, resolved in one Rust story traversal. */
   paragraphSpans(story: string): YrsParagraphLength[];
   /** The raw formatted-segment view (the render bridge's input). */
@@ -1698,6 +1717,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return blocks;
     },
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
+    searchText: (query, options) =>
+      searchText(
+        session.story_ids(),
+        (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
+        query,
+        options
+      ),
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
     locateParagraph: (story, paraId) =>
