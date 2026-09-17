@@ -67,6 +67,16 @@ struct LoweringContext {
     theme: Option<Value>,
     source_json: Arc<BTreeMap<String, String>>,
     plans: Vec<StoryPlan>,
+    compatibility_mode: u8,
+}
+
+fn compatibility_mode_from_package(package: Option<&Value>) -> u8 {
+    field(field(package, "settings"), "compatibilityFlags")
+        .and_then(|flags| field(Some(flags), "compatibilityMode"))
+        .and_then(|value| value.as_f64())
+        .filter(|value| value.is_finite() && (0.0..=255.0).contains(value))
+        .map(|value| value as u8)
+        .unwrap_or(12)
 }
 
 enum OrderedValue {
@@ -841,6 +851,11 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
             marks.push(mark(name, vec![]));
         }
     }
+    // Document-grid opt-out (w:snapToGrid, default on): only an authored off
+    // becomes a mark, mirroring documentToYrs.
+    if formatting.get("snapToGrid") == Some(&Value::Bool(false)) {
+        marks.push(mark("snapToGrid", vec![]));
+    }
     if ["spacing", "position", "scale", "kerning"]
         .iter()
         .any(|key| formatting.contains_key(*key))
@@ -908,6 +923,8 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
         }
         if boolean_marks.contains(&mark.name.as_str()) {
             attrs.insert(mark.name.clone(), Value::Bool(true));
+        } else if mark.name == "snapToGrid" {
+            attrs.insert("snapToGrid".to_owned(), Value::Bool(false));
         } else if mark.name == "highlight" {
             attrs.insert(
                 "highlight".to_owned(),
@@ -1811,6 +1828,9 @@ fn paragraph_attrs(
         "listMarkerHidden": truthy(field(list, "markerHidden")).then(|| field(list, "markerHidden").cloned()).flatten(),
         "listMarkerFontFamily": string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
         "listMarkerFontSize": number(field(list, "markerFontSize")).filter(|value| *value != 0.0),
+        "listMarkerBold": nullish(field(list, "markerBold")),
+        "listMarkerItalic": nullish(field(list, "markerItalic")),
+        "listMarkerColor": nullish(field(list, "markerColor")),
         "listMarkerSuffix": string(field(list, "markerSuffix")).filter(|value| !value.is_empty()),
         "listLevelNumFmts": truthy(field(list, "levelNumFmts")).then(|| field(list, "levelNumFmts").cloned()).flatten(),
         "listAbstractNumId": nullish(field(list, "abstractNumId")),
@@ -1839,6 +1859,7 @@ fn paragraph_attrs(
             "keepLines",
             "widowControl",
             "contextualSpacing",
+            "snapToGrid",
             "outlineLevel",
             "bidi",
         ] {
@@ -1932,6 +1953,7 @@ fn paragraph_attrs(
             "keepNext",
             "keepLines",
             "widowControl",
+            "snapToGrid",
             "outlineLevel",
             "bidi",
         ] {
@@ -2848,7 +2870,12 @@ fn project_row(
     }
 }
 
-fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -> ProjectedTable {
+fn project_table(
+    table: &Value,
+    styles: &StyleResolver,
+    theme: Option<&Value>,
+    compatibility_mode: u8,
+) -> ProjectedTable {
     let formatting = field(Some(table), "formatting");
     let default_style = styles.default_style("table");
     let style_id = string(field(formatting, "styleId"));
@@ -2923,6 +2950,11 @@ fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -
         "cellMargins": default_margins,
         "look": nullish(field(formatting, "look")),
         "bidi": truthy(field(formatting, "bidi")).then_some(true),
+        "compatibilityMode": if compatibility_mode == 12 {
+            Value::Null
+        } else {
+            json!(compatibility_mode as f64)
+        },
         "_originalFormatting": Value::Object(original_formatting)
     }));
     if !array(field(Some(table), "propertyChanges")).is_empty() {
@@ -3062,7 +3094,12 @@ fn visit_story(
             "table" => {
                 let current_table = table_index;
                 table_index += 1;
-                let table = project_table(block, &context.styles, context.theme.as_ref());
+                let table = project_table(
+                    block,
+                    &context.styles,
+                    context.theme.as_ref(),
+                    context.compatibility_mode,
+                );
                 let rows: Vec<Value> = table
                     .rows
                     .iter()
@@ -3363,11 +3400,13 @@ pub(crate) fn seed_parsed_docx(
     drop(envelope);
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
+    let compatibility_mode = compatibility_mode_from_package(Some(package));
     let mut context = LoweringContext {
         styles: StyleResolver::new(field(Some(package), "styles")),
         theme: field(Some(package), "theme").cloned(),
         source_json: Arc::new(source_json),
         plans: Vec::new(),
+        compatibility_mode,
     };
     visit_story(
         &mut context,
@@ -3476,6 +3515,7 @@ mod tests {
                 theme: None,
                 source_json: Arc::new(BTreeMap::new()),
                 plans: Vec::new(),
+                compatibility_mode: 12,
             };
             visit_story(
                 &mut context,
@@ -3593,6 +3633,7 @@ mod tests {
             theme: None,
             source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
+            compatibility_mode: 12,
         };
         visit_story(
             &mut context,
@@ -3856,6 +3897,24 @@ mod tests {
         assert_eq!(properties["hangingIndent"], json!(false));
     }
 
+    #[test]
+    fn numbering_level_marker_format_preserves_explicit_off() {
+        let styles = StyleResolver::new(None);
+        let properties = paragraph_attrs(
+            &json!({"formatting":{},"listRendering":{"marker":"1.","numFmt":"decimal","markerBold":false,"markerItalic":false,"markerColor":{"rgb":"000000"},"markerFontFamily":"Times New Roman","markerFontSize":12.0},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["listMarker"], json!("1."));
+        assert_eq!(properties["listMarkerBold"], json!(false));
+        assert_eq!(properties["listMarkerItalic"], json!(false));
+        assert_eq!(properties["listMarkerColor"], json!({"rgb":"000000"}));
+        assert_eq!(properties["listMarkerFontFamily"], json!("Times New Roman"));
+        assert_eq!(properties["listMarkerFontSize"], json!(12.0));
+    }
+
     use super::*;
 
     #[test]
@@ -3962,6 +4021,54 @@ mod tests {
         )
         .get("widowControl")
         .cloned()
+    }
+
+    fn snap_grid_styles() -> Value {
+        json!({
+            "docDefaults": { "pPr": {} },
+            "styles": [
+                { "styleId": "Normal", "type": "paragraph", "default": true, "pPr": {} },
+                { "styleId": "Body", "type": "paragraph", "pPr": { "snapToGrid": false } },
+                { "styleId": "Quote", "type": "paragraph", "pPr": { "snapToGrid": true } }
+            ]
+        })
+    }
+
+    fn seeded_snap_to_grid(styles: &StyleResolver, formatting: Value) -> Option<Value> {
+        paragraph_attrs(
+            &json!({ "formatting": formatting, "content": [] }),
+            styles,
+            &[],
+            &[],
+            None,
+        )
+        .get("snapToGrid")
+        .cloned()
+    }
+
+    #[test]
+    fn snap_to_grid_is_seeded_from_the_style_and_direct_formatting() {
+        let styles = StyleResolver::new(Some(&snap_grid_styles()));
+
+        assert_eq!(seeded_snap_to_grid(&styles, json!({})), Some(Value::Null));
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Body" })),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Quote" })),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Body", "snapToGrid": true })),
+            Some(Value::Bool(true)),
+            "a direct on overrides a style that opts out"
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Quote", "snapToGrid": false })),
+            Some(Value::Bool(false)),
+            "a direct off overrides a style that turns the toggle back on"
+        );
     }
 
     #[test]
