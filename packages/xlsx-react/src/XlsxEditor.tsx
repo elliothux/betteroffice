@@ -414,6 +414,8 @@ function XlsxEditorContent({
   const suppressBlurRef = useRef(false);
   const pendingSheetViewRef = useRef(false);
   const flushNudgeRef = useRef<() => void>(() => {});
+  const settlePendingEditsRef = useRef<() => boolean>(() => true);
+  const pendingDraftRef = useRef<(EditState & { sheet: number }) | null>(null);
   // latest onReady, read (not depended on) by the open effect so a changing
   // callback identity never reopens the workbook.
   const onReadyRef = useRef(onReady);
@@ -465,8 +467,14 @@ function XlsxEditorContent({
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
 
   const activeSheet = sheetInfo?.activeSheet ?? 0;
+  pendingDraftRef.current = editing
+    ? { sheet: activeSheet, ...editing }
+    : selection && formulaDraft !== null
+      ? { sheet: activeSheet, ...selection.focus, value: formulaDraft }
+      : null;
 
   const clearSelection = useCallback(() => {
+    if (!settlePendingEditsRef.current()) return;
     setSelection(null);
     setSelectedChart(null);
     setEditing(null);
@@ -488,6 +496,7 @@ function XlsxEditorContent({
           nextSelection.focus.row,
           nextSelection.focus.col
         );
+        if (!settlePendingEditsRef.current()) return false;
         handle.setActiveSheet(sheet);
         setSheetInfo(handle.sheetInfo());
         setSelection({
@@ -649,7 +658,9 @@ function XlsxEditorContent({
             refreshProposals,
             focus: () => scrollRef.current?.focus(),
             save: () => {
-              flushNudgeRef.current();
+              if (!settlePendingEditsRef.current()) {
+                throw new Error('Could not commit pending workbook edits');
+              }
               return handle!.save();
             },
             selectCells,
@@ -906,6 +917,29 @@ function XlsxEditorContent({
     },
     [refreshProposals]
   );
+
+  settlePendingEditsRef.current = () => {
+    const handle = handleRef.current;
+    if (!handle) return false;
+    flushNudgeRef.current();
+    chartDragRef.current = null;
+    setChartDragOffset(null);
+    setDragging(false);
+    const draft = pendingDraftRef.current;
+    if (!draft || readOnlyRef.current) return true;
+    try {
+      const result = handle.editCell(draft.sheet, draft.row, draft.col, draft.value);
+      pendingDraftRef.current = null;
+      suppressBlurRef.current = true;
+      setEditing(null);
+      setFormulaDraft(null);
+      applyResult(result);
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return false;
+    }
+  };
 
   const selectedRangeA1 = useCallback(
     (target: Selection): string | null => {
@@ -1447,7 +1481,7 @@ function XlsxEditorContent({
   const save = useCallback(() => {
     const handle = handleRef.current;
     if (!handle) return;
-    flushNudgeRef.current();
+    if (!settlePendingEditsRef.current()) return;
     try {
       const bytes = handle.save();
       if (onSave) onSave(bytes);
@@ -1843,7 +1877,7 @@ function XlsxEditorContent({
     const handle = handleRef.current;
     if (!handle) return;
     // the burst belongs to the sheet it was typed on.
-    flushNudgeRef.current();
+    if (!settlePendingEditsRef.current()) return;
     try {
       handle.setActiveSheet(index);
       pendingSheetViewRef.current = true;
