@@ -7,6 +7,7 @@ import initWasmModule, {
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { StaleProposalError } from '../proposals';
+import { searchText } from '../searchText';
 import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
 import type {
   CollaborationReplica,
@@ -22,6 +23,8 @@ import type {
   ParagraphAlignment,
   PresetShapeDraft,
   PptxFontFace,
+  PptxTextMatch,
+  PptxTextSearchOptions,
   ShapeAdjustReceipt,
   ShapeDraft,
   ShapeFillReceipt,
@@ -64,6 +67,8 @@ export interface PresentationHandle extends CollaborationReplica {
   readonly clientId: number;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
+  /** Find literal text across slide shape stories in deterministic deck order. */
+  searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
   layoutSlide(slideIndex: number): SlideDisplayList;
   hitTest(x: number, y: number): HitTestResult | null;
@@ -335,6 +340,9 @@ export function openPresentation(
     },
     story(storyId: string): StorySnapshot {
       return jsonWasmCall(() => doc.storyJson(JSON.stringify({ storyId })));
+    },
+    searchText(query, options) {
+      return searchText(jsonWasmCall(() => doc.snapshotJson()), query, options);
     },
     registerFont(face: PptxFontFace): number {
       return wasmCall(() => registerFont(renderer, face));

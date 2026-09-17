@@ -44,6 +44,24 @@ export interface StorySnapshot {
   paragraphs: ParagraphSnapshot[];
 }
 
+export interface PptxTextSearchOptions {
+  /** Match letter case. Defaults to false. */
+  caseSensitive?: boolean;
+  /** Stop after this many matches. Omit to return every match. */
+  limit?: number;
+}
+
+/** One text-story match. Slide indexes and text offsets are zero-based. */
+export interface PptxTextMatch {
+  slideIndex: number;
+  slideId: string;
+  shapeId: string;
+  storyId: string;
+  start: number;
+  end: number;
+  text: string;
+}
+
 export type ShapeKind = 'shape' | 'picture' | 'graphicFrame' | 'group';
 
 export interface ColorValue {
