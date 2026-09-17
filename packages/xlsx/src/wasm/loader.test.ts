@@ -5,6 +5,7 @@
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { XlsxTextMatch, XlsxTextSearchOptions } from '../index';
 
 import {
   StaleProposalError,
@@ -71,7 +72,9 @@ describe('wasm loader', () => {
       handle.setNumberFormat(2, 'C5', 'percent');
       const before = handle.encodeStateVector();
 
-      expect(handle.searchText('queryneedle')).toEqual([
+      const options: XlsxTextSearchOptions = { caseSensitive: false };
+      const matches: XlsxTextMatch[] = handle.searchText('queryneedle', options);
+      expect(matches).toEqual([
         {
           sheet: 0,
           sheetId: 'sheet:0',
