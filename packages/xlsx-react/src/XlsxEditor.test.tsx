@@ -839,6 +839,45 @@ describe('XlsxEditor host integration', () => {
       reopened.dispose();
     }
   });
+
+  it('does not finish an asynchronous paste after entering viewing mode', async () => {
+    const file = plain.bytes.slice();
+    let api: XlsxEditorApi | undefined;
+    let resolveClipboard!: (text: string) => void;
+    const clipboardText = new Promise<string>((resolve) => {
+      resolveClipboard = resolve;
+    });
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText: () => clipboardText },
+    });
+
+    try {
+      const onReady = (ready: XlsxEditorApi) => {
+        api = ready;
+      };
+      const view = render(<XlsxEditor file={file} onReady={onReady} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const target = { row: 2, col: 0 };
+      const before = api!.handle.cell(0, target.row, target.col).input;
+      await act(async () => {
+        api!.selectCells(0, selectionAt(target));
+      });
+
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      view.rerender(<XlsxEditor file={file} onReady={onReady} readOnly />);
+      await act(async () => resolveClipboard('late paste'));
+
+      expect(api!.handle.cell(0, target.row, target.col).input).toBe(before);
+    } finally {
+      if (originalClipboard) {
+        Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      } else {
+        Reflect.deleteProperty(navigator, 'clipboard');
+      }
+    }
+  });
 });
 
 describe('XlsxEditor proposal review', () => {

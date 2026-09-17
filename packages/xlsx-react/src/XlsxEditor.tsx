@@ -420,6 +420,8 @@ function XlsxEditorContent({
   onReadyRef.current = onReady;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
 
   const [sheetInfo, setSheetInfo] = useState<SheetInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1161,6 +1163,7 @@ function XlsxEditorContent({
     } catch {
       return;
     }
+    if (readOnlyRef.current || handleRef.current !== handle) return;
     const grid = fromTsv(text);
     if (grid.length === 0) return;
     const r = normalizeRange(selection);
