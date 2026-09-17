@@ -249,6 +249,67 @@ describe('PptxEditor host integration', () => {
   }, 60_000);
 });
 
+describe('PptxEditor viewing transitions', () => {
+  it('keeps the document open and restores editing when viewing mode ends', async () => {
+    const opened: PptxEditorApi[] = [];
+    const onReady = (api: PptxEditorApi) => opened.push(api);
+    const props = {
+      file: fixture,
+      fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+      onReady,
+    };
+    const view = render(
+      <PptxEditor {...props} initialSlide={Number.MAX_SAFE_INTEGER} readOnly />
+    );
+    await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
+    const api = opened[0];
+    const before = api.handle.snapshot();
+    const last = before.slides.length;
+    expect(
+      view.container.querySelector('button[aria-current="page"]')?.textContent
+    ).toContain(String(last));
+    await act(async () => {
+      expect(api.goToSlide(Number.NaN)).toBe(false);
+      expect(api.goToSlide(last + 1)).toBe(false);
+    });
+    expect(
+      view.container.querySelector('button[aria-current="page"]')?.textContent
+    ).toContain(String(last));
+    await act(async () => {
+      view.rerender(<PptxEditor {...props} initialSlide={1} />);
+    });
+    expect(opened).toHaveLength(1);
+    expect(view.getByTestId('pptx-editor-toolbar')).toBeDefined();
+    expect(
+      view.container.querySelector('button[aria-current="page"]')?.textContent
+    ).toContain(String(last));
+    const shape = before.slides[0].shapes.find(
+      (candidate) => candidate.textStories.length > 0
+    )!;
+    const story = shape.textStories[0];
+    await act(async () => {
+      expect(
+        api.selectText({
+          slide: 1,
+          shapeId: shape.id,
+          storyId: story.id,
+          start: 0,
+          end: 0,
+        })
+      ).toBe(true);
+    });
+    fireEvent.keyDown(view.getByRole('application'), { key: 'x' });
+    expect(api.handle.story(story.id).paragraphs[0].runs[0].text).toStartWith('x');
+    await act(async () => {
+      view.rerender(<PptxEditor {...props} readOnly />);
+    });
+    const edited = api.handle.snapshot();
+    fireEvent.keyDown(view.getByRole('application'), { key: 'Backspace' });
+    expect(api.handle.snapshot()).toEqual(edited);
+    expect(opened).toHaveLength(1);
+  }, 60_000);
+});
+
 describe('PptxEditor caret painting', () => {
   const frame: SlideDisplayList = {
     contractVersion: 1,
