@@ -1720,7 +1720,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     searchText: (query, options) =>
       searchText(
         session.story_ids(),
-        (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
+        (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
         query,
         options
       ),

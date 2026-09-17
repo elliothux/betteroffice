@@ -43,4 +43,22 @@ describe('YrsSession searchText', () => {
       session.destroy();
     }
   });
+
+  it('does not match across inline embeds and preserves their offset unit', async () => {
+    const session = await createYrsSession({ clientId: 76003 });
+    try {
+      const body = session.createStory('body', 'foobar');
+      session.insertPageBreak({ story: 'body', paraId: body.paraId, offset: 3 });
+
+      expect(session.searchText('foobar')).toEqual([]);
+      expect(session.searchText('foo')).toEqual([
+        { story: 'body', paraId: body.paraId, start: 0, end: 3, text: 'foo' },
+      ]);
+      expect(session.searchText('bar')).toEqual([
+        { story: 'body', paraId: body.paraId, start: 4, end: 7, text: 'bar' },
+      ]);
+    } finally {
+      session.destroy();
+    }
+  });
 });
