@@ -23,7 +23,6 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
-import { searchText } from './searchText';
 
 export * from './inputPositionMap';
 export {
@@ -914,7 +913,7 @@ export interface YrsSession extends CollaborationReplica {
   yrsBlocksForStory(story: string, env?: YrsRenderEnv): unknown[];
   /** Paragraph snapshots in document order. */
   paragraphs(story: string): YrsParagraph[];
-  /** Find literal text across every story in deterministic story and paragraph order. */
+  /** Find literal text in document order, including nested table cells. */
   searchText(query: string, options?: YrsTextSearchOptions): YrsTextMatch[];
   /** Paragraph ids and inline-unit lengths, resolved in one Rust story traversal. */
   paragraphSpans(story: string): YrsParagraphLength[];
@@ -1722,13 +1721,20 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return blocks;
     },
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
-    searchText: (query, options) =>
-      searchText(
-        session.story_ids(),
-        (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
-        query,
-        options
-      ),
+    searchText: (query, options = {}) => {
+      if (!query) return [];
+      const limit = options.limit ?? Number.POSITIVE_INFINITY;
+      if ((!Number.isSafeInteger(limit) && limit !== Number.POSITIVE_INFINITY) || limit < 0) {
+        throw new RangeError('search limit must be a non-negative safe integer');
+      }
+      return JSON.parse(
+        session.search_text(
+          query,
+          options.caseSensitive ?? false,
+          Number.isFinite(limit) ? Math.min(limit, 0xffffffff) : undefined
+        )
+      ) as YrsTextMatch[];
+    },
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
     locateParagraph: (story, paraId) =>
