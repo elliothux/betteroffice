@@ -95,7 +95,7 @@ platform. Bootstrap every name in that set together:
 2. Run `bun install --frozen-lockfile`, then
    `bunx napi artifacts --cwd bindings/node-<format>`.
 3. Log in to npm with an account that can publish the `@betteroffice` scope and
-   run `npm publish --access public --provenance` from
+   run `npm publish --access public --provenance=false` from
    `bindings/node-<format>`. Its `prepublishOnly` publishes the five platform
    packages before npm publishes the root package.
 4. Configure all six package names with workflow

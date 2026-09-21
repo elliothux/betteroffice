@@ -98,6 +98,8 @@ describe('Node binding release wiring', () => {
     );
     expect(dist.jobs.bindings.strategy.matrix.platform).toHaveLength(5);
     expect(dist.jobs.bindings.steps[0].with.ref).toBe('${{ inputs.sha }}');
+    const build = dist.jobs.bindings.steps.find((step: any) => step.name === 'Build binding');
+    expect(build.run).toContain('--platform');
   });
 
   test('a failed registry lookup fails the dispatch step', () => {
