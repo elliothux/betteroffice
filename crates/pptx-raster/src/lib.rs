@@ -9,7 +9,9 @@ mod font;
 
 pub use font::GlyphCache;
 
-use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -44,6 +46,9 @@ pub const MAX_SLIDE_IMAGE_PIXELS: u64 = 67_108_864;
 pub const MAX_IMAGE_BYTES: u64 = 268_435_456;
 /// The same, summed across every image one slide decodes.
 pub const MAX_SLIDE_IMAGE_BYTES: u64 = 536_870_912;
+/// Decoded pixmaps one [`ImageCache`] retains, at the bytes one slide's decodes
+/// may cost. Past the cap the oldest insertion evicts first.
+const MAX_CACHED_IMAGE_BYTES: u64 = MAX_SLIDE_IMAGE_BYTES;
 /// Scratch pixels every shadow on one slide may blur between them, eight full surfaces.
 /// A slide may carry 100_000 shapes and each shadow blurs its own buffer six times over.
 pub const MAX_SHADOW_PIXELS: u64 = 134_217_728;
@@ -136,8 +141,8 @@ pub fn render_png(
     dl: &SurfaceDisplayList,
     resources: &RenderResources<'_>,
 ) -> Result<Vec<u8>, String> {
-    let mut cache = GlyphCache::default();
-    Ok(render_slide_cached(dl, resources, &RenderOptions::default(), &mut cache)?.bytes)
+    let mut glyphs = GlyphCache::default();
+    Ok(render_slide_cached(dl, resources, &RenderOptions::default(), &mut glyphs)?.bytes)
 }
 
 /// Paint a slide display list at `options.scale`.
@@ -146,8 +151,8 @@ pub fn render_slide(
     resources: &RenderResources<'_>,
     options: &RenderOptions,
 ) -> Result<RenderedSlide, String> {
-    let mut cache = GlyphCache::default();
-    render_slide_cached(dl, resources, options, &mut cache)
+    let mut glyphs = GlyphCache::default();
+    render_slide_cached(dl, resources, options, &mut glyphs)
 }
 
 /// The same, reusing glyph outlines an earlier slide extracted. The cache binds
@@ -157,6 +162,17 @@ pub fn render_slide_cached(
     resources: &RenderResources<'_>,
     options: &RenderOptions,
     glyphs: &mut GlyphCache,
+) -> Result<RenderedSlide, String> {
+    render_slide_shared(dl, resources, options, glyphs, &mut ImageCache::default())
+}
+
+/// The same, also sharing decoded assets across slides through `images`.
+pub fn render_slide_shared(
+    dl: &SurfaceDisplayList,
+    resources: &RenderResources<'_>,
+    options: &RenderOptions,
+    glyphs: &mut GlyphCache,
+    images: &mut ImageCache,
 ) -> Result<RenderedSlide, String> {
     if !options.scale.is_finite() || options.scale <= 0.0 {
         return Err("render scale must be finite and positive".to_string());
@@ -193,7 +209,9 @@ pub fn render_slide_cached(
         scale: options.scale,
         resources,
         glyphs,
-        images: ImageCache::default(),
+        images,
+        image_budget: ImageBudget::default(),
+        asset_hashes: HashMap::new(),
         shape_clip_cache: None,
         skipped_images: 0,
         shadow_pixels: 0,
@@ -210,6 +228,69 @@ pub fn render_slide_cached(
         height,
         skipped_images,
     })
+}
+
+struct ShadowGeometry<'a> {
+    path: Path,
+    fill: bool,
+    stroke: Option<&'a SlideStroke>,
+}
+
+fn shadow_geometry<'a>(
+    shadow: &'a SlideShadow,
+    path: &Path,
+    stroke: Option<&'a SlideStroke>,
+    [x, y, w, h]: [f32; 4],
+) -> Vec<ShadowGeometry<'a>> {
+    if shadow.paths.is_empty() {
+        return vec![ShadowGeometry {
+            path: path.clone(),
+            fill: true,
+            stroke,
+        }];
+    }
+    shadow
+        .paths
+        .iter()
+        .filter_map(|part| {
+            Some(ShadowGeometry {
+                path: geometry_path(&part.path, x, y, w, h)?,
+                fill: part.fill,
+                stroke: part.stroke.as_ref(),
+            })
+        })
+        .collect()
+}
+
+fn shadow_bounds(paths: &[ShadowGeometry<'_>], placed: Transform) -> Option<Rect> {
+    let mut bounds: Option<Rect> = None;
+    for part in paths {
+        let Some(path) = part.path.clone().transform(placed) else {
+            continue;
+        };
+        let next = path.bounds();
+        bounds = Some(match bounds {
+            None => next,
+            Some(previous) => Rect::from_ltrb(
+                previous.left().min(next.left()),
+                previous.top().min(next.top()),
+                previous.right().max(next.right()),
+                previous.bottom().max(next.bottom()),
+            )?,
+        });
+    }
+    bounds
+}
+
+fn shadow_reach(paths: &[ShadowGeometry<'_>], shadow: &SlideShadow, scale: f32) -> f32 {
+    paths
+        .iter()
+        .filter_map(|part| part.stroke)
+        .map(|stroke| stroke.width)
+        .fold(0.0, f32::max)
+        * scale
+        * shadow.scale_x.abs().max(shadow.scale_y.abs())
+        * 2.0
 }
 
 fn surface_dimension(value: f32, scale: f32, label: &str) -> Result<u32, String> {
@@ -243,7 +324,9 @@ struct Painter<'a, 'b> {
     max_shadow_pixels: u64,
     resources: &'a RenderResources<'b>,
     glyphs: &'a mut GlyphCache,
-    images: ImageCache,
+    images: &'a mut ImageCache,
+    image_budget: ImageBudget,
+    asset_hashes: HashMap<String, u64>,
     shape_clip_cache: Option<ShapeClipCache>,
     skipped_images: usize,
 }
@@ -522,7 +605,7 @@ impl Painter<'_, '_> {
         let (kept_x, kept_y) = crop.kept();
         let bounded = !crop.is_whole() || commands.is_some();
         let mut mask = None;
-        let mut decoded = None;
+        let mut decoded: Option<(Arc<Pixmap>, Transform)> = None;
         if kept_x > 0.0 && kept_y > 0.0 {
             if bounded {
                 let Some(bound) = self.clipped_path(clip, outline.clone(), transform)? else {
@@ -549,7 +632,7 @@ impl Painter<'_, '_> {
             self.paint_image_shadow(
                 [x, y, w, h],
                 &outline,
-                decoded.as_ref().map(|(source, fit)| (source, *fit)),
+                decoded.clone(),
                 bounded,
                 stroke,
                 shadow,
@@ -561,7 +644,7 @@ impl Painter<'_, '_> {
             self.pixmap.draw_pixmap(
                 0,
                 0,
-                source.as_ref(),
+                (**source).as_ref(),
                 &PixmapPaint {
                     quality: FilterQuality::Bicubic,
                     ..PixmapPaint::default()
@@ -582,7 +665,7 @@ impl Painter<'_, '_> {
         &mut self,
         bounds: [f32; 4],
         outline: &Path,
-        decoded: Option<(&Pixmap, Transform)>,
+        decoded: Option<(Arc<Pixmap>, Transform)>,
         bounded: bool,
         stroke: Option<&SlideStroke>,
         shadow: &SlideShadow,
@@ -590,49 +673,56 @@ impl Painter<'_, '_> {
         clip: Option<&Mask>,
     ) -> Result<(), String> {
         let color = parse_color(&shadow.color)?;
-        if color.alpha() == 0.0 || (decoded.is_none() && stroke.is_none()) {
+        let paths = shadow_geometry(shadow, outline, stroke, bounds);
+        if color.alpha() == 0.0
+            || !paths
+                .iter()
+                .any(|part| (part.fill && decoded.is_some()) || part.stroke.is_some())
+        {
             return Ok(());
         }
         let placed = placed_shadow(shadow, transform, self.scale);
-        let Some(placed_outline) = outline.clone().transform(placed) else {
+        let Some(placed_bounds) = shadow_bounds(&paths, placed) else {
             return Ok(());
         };
-        let reach = stroke.map_or(0.0, |stroke| {
-            stroke.width * self.scale * shadow.scale_x.abs().max(shadow.scale_y.abs()) * 2.0
-        });
+        let reach = shadow_reach(&paths, shadow, self.scale);
         self.paint_shadow_layer(
-            placed_outline.bounds(),
+            placed_bounds,
             reach,
             shadow,
             color,
             placed,
             clip,
             |scratch, local| {
-                if let Some((source, fit)) = decoded {
-                    let mask = if bounded {
-                        let mut mask = Mask::new(scratch.width(), scratch.height())
-                            .ok_or("invalid shadow mask size".to_string())?;
-                        mask.fill_path(outline, FillRule::Winding, true, local);
-                        Some(mask)
-                    } else {
-                        None
-                    };
-                    scratch.draw_pixmap(
-                        0,
-                        0,
-                        source.as_ref(),
-                        &PixmapPaint {
-                            quality: FilterQuality::Bicubic,
-                            ..PixmapPaint::default()
-                        },
-                        local.pre_concat(fit),
-                        mask.as_ref(),
-                    );
-                }
-                if let Some(stroke) = stroke
-                    && let Some((paint, stroke)) = stroke_paint(stroke, bounds)?
-                {
-                    scratch.stroke_path(outline, &paint, &stroke, local, None);
+                for part in &paths {
+                    if part.fill
+                        && let Some((source, fit)) = &decoded
+                    {
+                        let mask = if bounded || !shadow.paths.is_empty() {
+                            let mut mask = Mask::new(scratch.width(), scratch.height())
+                                .ok_or("invalid shadow mask size".to_string())?;
+                            mask.fill_path(&part.path, FillRule::Winding, true, local);
+                            Some(mask)
+                        } else {
+                            None
+                        };
+                        scratch.draw_pixmap(
+                            0,
+                            0,
+                            (**source).as_ref(),
+                            &PixmapPaint {
+                                quality: FilterQuality::Bicubic,
+                                ..PixmapPaint::default()
+                            },
+                            local.pre_concat(*fit),
+                            mask.as_ref(),
+                        );
+                    }
+                    if let Some(stroke) = part.stroke
+                        && let Some((paint, stroke)) = stroke_paint(stroke, bounds)?
+                    {
+                        scratch.stroke_path(&part.path, &paint, &stroke, local, None);
+                    }
                 }
                 Ok(())
             },
@@ -701,32 +791,39 @@ impl Painter<'_, '_> {
         clip: Option<&Mask>,
     ) -> Result<(), String> {
         let color = parse_color(&shadow.color)?;
-        if color.alpha() == 0.0 || (fill.is_none() && stroke.is_none()) {
+        let paths = shadow_geometry(shadow, path, stroke, [x, y, w, h]);
+        if color.alpha() == 0.0
+            || !paths
+                .iter()
+                .any(|part| (part.fill && fill.is_some()) || part.stroke.is_some())
+        {
             return Ok(());
         }
         let placed = placed_shadow(shadow, transform, self.scale);
-        let Some(placed_path) = path.clone().transform(placed) else {
+        let Some(bounds) = shadow_bounds(&paths, placed) else {
             return Ok(());
         };
-        let reach = stroke.map_or(0.0, |stroke| {
-            stroke.width * self.scale * shadow.scale_x.abs().max(shadow.scale_y.abs()) * 2.0
-        });
+        let reach = shadow_reach(&paths, shadow, self.scale);
         self.paint_shadow_layer(
-            placed_path.bounds(),
+            bounds,
             reach,
             shadow,
             color,
             placed,
             clip,
             |scratch, local| {
-                if let Some(fill) = fill {
-                    let paint = shader_paint(fill, x, y, w, h)?;
-                    scratch.fill_path(path, &paint, FillRule::Winding, local, None);
-                }
-                if let Some(stroke) = stroke
-                    && let Some((paint, stroke)) = stroke_paint(stroke, [x, y, w, h])?
-                {
-                    scratch.stroke_path(path, &paint, &stroke, local, None);
+                for part in &paths {
+                    if part.fill
+                        && let Some(fill) = fill
+                    {
+                        let paint = shader_paint(fill, x, y, w, h)?;
+                        scratch.fill_path(&part.path, &paint, FillRule::Winding, local, None);
+                    }
+                    if let Some(stroke) = part.stroke
+                        && let Some((paint, stroke)) = stroke_paint(stroke, [x, y, w, h])?
+                    {
+                        scratch.stroke_path(&part.path, &paint, &stroke, local, None);
+                    }
                 }
                 Ok(())
             },
@@ -813,9 +910,26 @@ impl Painter<'_, '_> {
         Ok(())
     }
 
-    fn decode(&mut self, asset_id: &str, effects: &[pptx_render::ImageEffect]) -> Option<Pixmap> {
+    fn decode(
+        &mut self,
+        asset_id: &str,
+        effects: &[pptx_render::ImageEffect],
+    ) -> Option<Arc<Pixmap>> {
         let bytes = self.resources.images.get(asset_id)?;
-        self.images.decode(bytes, effects)
+        let source = match self.asset_hashes.get(asset_id) {
+            Some(source) => *source,
+            None => {
+                let source = source_hash(asset_id, bytes);
+                self.asset_hashes.insert(asset_id.to_owned(), source);
+                source
+            }
+        };
+        self.images.decode(
+            (source, effects_fingerprint(effects)),
+            bytes,
+            effects,
+            &mut self.image_budget,
+        )
     }
 }
 
@@ -1059,20 +1173,129 @@ fn stroke_paint(
         Stroke {
             width: stroke.width,
             dash: dash.flatten(),
+            line_join: match stroke.join.as_deref() {
+                Some("round") => tiny_skia::LineJoin::Round,
+                Some("bevel") => tiny_skia::LineJoin::Bevel,
+                _ => tiny_skia::LineJoin::Miter,
+            },
             ..Stroke::default()
         },
     )))
 }
 
-/// Decoded images for one slide, budgeted so a hostile deck cannot allocate its
-/// way out of the surface caps.
+/// Decoded assets shared across the slides of one render job, keyed by asset
+/// identity and effects; each entry paints once rather than once per reference.
+pub struct ImageCache {
+    decoded: HashMap<ImageKey, Arc<Pixmap>>,
+    order: VecDeque<ImageKey>,
+    retained: u64,
+    cap: u64,
+}
+
+type ImageKey = (u64, u64);
+
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self {
+            decoded: HashMap::new(),
+            order: VecDeque::new(),
+            retained: 0,
+            cap: MAX_CACHED_IMAGE_BYTES,
+        }
+    }
+}
+
+impl ImageCache {
+    /// The pixmap for `key`, or `None` for content this backend will not draw.
+    /// A miss decodes through `budget` once; failures are not retained.
+    fn decode(
+        &mut self,
+        key: ImageKey,
+        bytes: &[u8],
+        effects: &[pptx_render::ImageEffect],
+        budget: &mut ImageBudget,
+    ) -> Option<Arc<Pixmap>> {
+        if let Some(pixmap) = self.decoded.get(&key) {
+            return Some(Arc::clone(pixmap));
+        }
+        let pixmap = Arc::new(budget.decode(bytes, effects)?);
+        self.remember(key, Arc::clone(&pixmap));
+        Some(pixmap)
+    }
+
+    /// Keeps a decode while the cache has room; oldest insertions evict first.
+    fn remember(&mut self, key: ImageKey, pixmap: Arc<Pixmap>) {
+        let cost = pixmap.data().len() as u64;
+        while self.retained + cost > self.cap {
+            let Some(oldest) = self.order.pop_front() else {
+                return;
+            };
+            if let Some(evicted) = self.decoded.remove(&oldest) {
+                self.retained -= evicted.data().len() as u64;
+            }
+        }
+        self.retained += cost;
+        self.order.push_back(key);
+        self.decoded.insert(key, pixmap);
+    }
+}
+
+/// An asset id plus its encoded bytes identify a decode: an id that starts
+/// resolving to new content gets a new entry.
+fn source_hash(asset_id: &str, bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    asset_id.hash(&mut hasher);
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+fn image_key(asset_id: &str, bytes: &[u8], effects: &[pptx_render::ImageEffect]) -> ImageKey {
+    (source_hash(asset_id, bytes), effects_fingerprint(effects))
+}
+
+fn effects_fingerprint(effects: &[pptx_render::ImageEffect]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for effect in effects {
+        std::mem::discriminant(effect).hash(&mut hasher);
+        match effect {
+            pptx_render::ImageEffect::BiLevel { threshold } => {
+                threshold.to_bits().hash(&mut hasher);
+            }
+            pptx_render::ImageEffect::Grayscale => {}
+            pptx_render::ImageEffect::Luminance {
+                brightness,
+                contrast,
+            } => {
+                brightness.to_bits().hash(&mut hasher);
+                contrast.to_bits().hash(&mut hasher);
+            }
+            pptx_render::ImageEffect::Duotone { shadow, highlight } => {
+                shadow.hash(&mut hasher);
+                highlight.hash(&mut hasher);
+            }
+            pptx_render::ImageEffect::ColorChange {
+                from,
+                to,
+                use_alpha,
+            } => {
+                from.hash(&mut hasher);
+                to.hash(&mut hasher);
+                use_alpha.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+/// One slide's decode budget: what its fresh decodes may still cost.
 #[derive(Default)]
-struct ImageCache {
+struct ImageBudget {
     pixels: u64,
     bytes: u64,
 }
 
-impl ImageCache {
+impl ImageBudget {
     /// Decoded pixels, or `None` for content this backend will not draw: bytes
     /// it cannot decode, an image past [`MAX_IMAGE_PIXELS`], or one the slide
     /// has no budget left for. Declared pixels are charged before the decoder
@@ -1158,6 +1381,7 @@ mod tests {
         for kind in ["line", "rect", "image"] {
             let mut list = empty_list(240.0, 160.0);
             let stroke = SlideStroke {
+                join: None,
                 color: "#00FF00".into(),
                 width: 8.0,
                 dashed: false,
@@ -1181,6 +1405,7 @@ mod tests {
             let h = if kind == "line" { 0.0 } else { 80.0 };
             list.primitives.push(if kind == "image" {
                 Primitive::Image {
+                    geometry_fallback: false,
                     object_id: 1,
                     shape_id: None,
                     name: kind.into(),
@@ -1212,6 +1437,7 @@ mod tests {
                     adjust_values: Default::default(),
                     path: ooxml_drawingml::preset_geometry_to_path(kind, &Default::default(), 2.5)
                         .unwrap(),
+                    geometry_fallback: false,
                     fill: None,
                     stroke: Some(stroke),
                     transform: SlideTransform::default(),
@@ -1254,10 +1480,13 @@ mod tests {
                 .write_image_data(&[3, 167, 223, 128, 255, 255, 255, 0])
                 .unwrap();
         }
+        let effects = [pptx_render::ImageEffect::BiLevel { threshold: 0.25 }];
         let image = ImageCache::default()
             .decode(
+                image_key("a.png", &bytes, &effects),
                 &bytes,
-                &[pptx_render::ImageEffect::BiLevel { threshold: 0.25 }],
+                &effects,
+                &mut ImageBudget::default(),
             )
             .unwrap();
         assert_eq!(
@@ -1265,11 +1494,84 @@ mod tests {
             ColorU8::from_rgba(255, 255, 255, 128).premultiply()
         );
         assert_eq!(image.pixel(1, 0).unwrap().alpha(), 0);
-        let source = ImageCache::default().decode(&bytes, &[]).unwrap();
+        let source = ImageCache::default()
+            .decode(
+                image_key("a.png", &bytes, &[]),
+                &bytes,
+                &[],
+                &mut ImageBudget::default(),
+            )
+            .unwrap();
         assert_eq!(
             source.pixel(0, 0).unwrap(),
             ColorU8::from_rgba(3, 167, 223, 128).premultiply()
         );
+    }
+
+    #[test]
+    fn a_cached_decode_serves_repeats_and_distinct_effects_separately() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[3, 167, 223, 128, 255, 255, 255, 0])
+                .unwrap();
+        }
+        let mut cache = ImageCache::default();
+        let mut budget = ImageBudget::default();
+        let effects = [pptx_render::ImageEffect::Grayscale];
+        let first = cache
+            .decode(image_key("a.png", &bytes, &[]), &bytes, &[], &mut budget)
+            .unwrap();
+        let repeat = cache
+            .decode(image_key("a.png", &bytes, &[]), &bytes, &[], &mut budget)
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &repeat));
+        assert_eq!(cache.decoded.len(), 1);
+        let gray = cache
+            .decode(
+                image_key("a.png", &bytes, &effects),
+                &bytes,
+                &effects,
+                &mut budget,
+            )
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &gray));
+        let other_asset = cache
+            .decode(image_key("b.png", &bytes, &[]), &bytes, &[], &mut budget)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &other_asset));
+        assert_eq!(cache.decoded.len(), 3);
+        assert!(
+            budget.pixels > 0,
+            "each miss still charges the slide budget"
+        );
+    }
+
+    #[test]
+    fn the_image_cache_evicts_oldest_first_past_its_cap() {
+        let mut cache = ImageCache {
+            cap: 8,
+            ..ImageCache::default()
+        };
+        let pixmap = || Arc::new(Pixmap::new(1, 1).unwrap());
+        cache.remember((1, 0), pixmap());
+        cache.remember((2, 0), pixmap());
+        cache.remember((3, 0), pixmap());
+        assert_eq!(cache.decoded.len(), 2);
+        assert!(!cache.decoded.contains_key(&(1, 0)));
+        assert!(cache.decoded.contains_key(&(3, 0)));
+
+        let mut cache = ImageCache {
+            cap: 0,
+            ..ImageCache::default()
+        };
+        cache.remember((1, 0), pixmap());
+        assert!(cache.decoded.is_empty(), "an oversized entry never stores");
     }
 
     #[test]
@@ -1364,6 +1666,7 @@ mod tests {
                 h: 20.0,
                 geometry: "custom".into(),
                 path,
+                geometry_fallback: false,
                 clip: Some(rect(0.0, 0.0, 1.0, 1.0)),
                 even_odd: true,
                 adjust_values: Default::default(),
@@ -1433,12 +1736,14 @@ mod tests {
                     GeometryPathCommand::Line { x: 0.0, y: 1.0 },
                     GeometryPathCommand::Close,
                 ],
+                geometry_fallback: false,
                 adjust_values: Default::default(),
                 fill: Some(SlidePaint::Solid {
                     color: "#4472C4".into(),
                 }),
                 stroke: None,
                 shadow: Some(SlideShadow {
+                    paths: Vec::new(),
                     color: "#00000066".into(),
                     blur: 8.0,
                     dx: 1.0,
@@ -1488,6 +1793,7 @@ mod tests {
                 GeometryPathCommand::Line { x: 0.0, y: 1.0 },
                 GeometryPathCommand::Close,
             ],
+            geometry_fallback: false,
             adjust_values: Default::default(),
             fill: Some(SlidePaint::Solid {
                 color: "#4472C4".into(),
@@ -1517,6 +1823,7 @@ mod tests {
 
         let plain = render(square(None));
         let shadowed = render(square(Some(SlideShadow {
+            paths: Vec::new(),
             color: "#00000066".into(),
             blur: 8.0,
             dx: 6.0,
@@ -1564,12 +1871,14 @@ mod tests {
                 GeometryPathCommand::Line { x: 0.0, y: 1.0 },
                 GeometryPathCommand::Close,
             ],
+            geometry_fallback: false,
             adjust_values: Default::default(),
             fill: fill.map(|color| SlidePaint::Solid {
                 color: color.into(),
             }),
             stroke,
             shadow: Some(SlideShadow {
+                paths: Vec::new(),
                 color: "#00000066".into(),
                 blur,
                 dx,
@@ -1633,6 +1942,87 @@ mod tests {
     }
 
     #[test]
+    fn layered_shape_and_picture_shadows_composite_alpha_with_one_budget_charge() {
+        let mut list = shadow_probe(40.0, Some("#FF000080"), None, 0.0, 60.0);
+        let Primitive::Shape {
+            path,
+            shadow: Some(shadow),
+            ..
+        } = &mut list.primitives[0]
+        else {
+            panic!()
+        };
+        shadow.paths = vec![
+            pptx_render::ShadowPath {
+                path: path.clone(),
+                fill: true,
+                stroke: None,
+            };
+            2
+        ];
+        let picture = shadowed_image("mark", shadow.clone());
+        let mut source = Pixmap::new(40, 40).unwrap();
+        source.fill(Color::from_rgba8(255, 0, 0, 128));
+        let bytes = source.encode_png().unwrap();
+        let fonts = FontStore::new();
+        let images = AssetMap::from([("mark", bytes.as_slice())]);
+        let resources = resources(&fonts, &images);
+        let options = RenderOptions {
+            max_shadow_pixels: 42 * 42,
+            ..Default::default()
+        };
+        for primitive in [list.primitives[0].clone(), picture] {
+            list.primitives = vec![primitive];
+            let rendered = render_slide(&list, &resources, &options).unwrap();
+            let pixels = Pixmap::decode_png(&rendered.bytes).unwrap();
+            assert_eq!(pixels.pixel(120, 60).unwrap().red(), 178);
+            assert_eq!(pixels.pixel(95, 60).unwrap().red(), 255);
+            let tight = RenderOptions {
+                max_shadow_pixels: 42 * 42 - 1,
+                ..options.clone()
+            };
+            assert!(
+                render_slide(&list, &resources, &tight)
+                    .unwrap_err()
+                    .contains("shadows cover")
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_first_layer_preserves_the_open_stroke_shadow() {
+        let stroke = SlideStroke {
+            color: "#C00000".into(),
+            width: 2.0,
+            dashed: false,
+            paint: None,
+            head_end: None,
+            tail_end: None,
+            join: None,
+        };
+        let mut list = shadow_probe(40.0, None, Some(stroke), 0.0, 60.0);
+        let Primitive::Shape {
+            path,
+            stroke,
+            shadow: Some(shadow),
+            ..
+        } = &mut list.primitives[0]
+        else {
+            panic!()
+        };
+        path.pop();
+        shadow.paths = vec![pptx_render::ShadowPath {
+            path: path.clone(),
+            fill: false,
+            stroke: stroke.take(),
+        }];
+        let pixels = render_probe(&list, 1.0);
+        assert!(pixels.pixel(120, 40).unwrap().red() < 255);
+        assert_eq!(pixels.pixel(120, 60).unwrap().red(), 255);
+        assert_eq!(pixels.pixel(100, 60).unwrap().red(), 255);
+    }
+
+    #[test]
     fn a_picture_shadow_traces_the_alpha_rather_than_the_frame() {
         let mut source = Pixmap::new(80, 80).unwrap();
         for y in 20..60 {
@@ -1646,6 +2036,7 @@ mod tests {
         let images = AssetMap::from([("mark", bytes.as_slice())]);
         let mut list = empty_list(300.0, 200.0);
         list.primitives.push(Primitive::Image {
+            geometry_fallback: false,
             object_id: 1,
             shape_id: None,
             name: "Mark".into(),
@@ -1659,6 +2050,7 @@ mod tests {
             path: None,
             stroke: None,
             shadow: Some(SlideShadow {
+                paths: Vec::new(),
                 color: "#000000FF".into(),
                 blur: 0.0,
                 dx: 120.0,
@@ -1696,6 +2088,7 @@ mod tests {
 
     fn shadowed_image(asset: &str, shadow: SlideShadow) -> Primitive {
         Primitive::Image {
+            geometry_fallback: false,
             object_id: 1,
             shape_id: None,
             name: "shadow probe".into(),
@@ -1722,6 +2115,7 @@ mod tests {
         list.primitives.push(shadowed_image(
             "mark",
             SlideShadow {
+                paths: Vec::new(),
                 color: "#00000066".into(),
                 blur: 8.0,
                 dx: 60.0,
@@ -1750,6 +2144,7 @@ mod tests {
         list.primitives.push(shadowed_image(
             "mark",
             SlideShadow {
+                paths: Vec::new(),
                 color: "#00000066".into(),
                 blur: 0.0,
                 dx: 0.0,
@@ -1784,6 +2179,7 @@ mod tests {
     #[test]
     fn outline_shadows_keep_the_center_hollow() {
         let stroke = SlideStroke {
+            join: None,
             paint: None,
             color: "#C00000".into(),
             width: 2.0,
@@ -1829,6 +2225,7 @@ mod tests {
             40.0,
             None,
             Some(SlideStroke {
+                join: None,
                 color: "#FF0000".into(),
                 width: 8.0,
                 paint: None,
@@ -1932,6 +2329,7 @@ mod tests {
         for flip_h in [false, true] {
             for parent_clip in [false, true] {
                 let image = Primitive::Image {
+                    geometry_fallback: false,
                     object_id: 1,
                     shape_id: None,
                     name: "Photo".into(),
@@ -1953,6 +2351,7 @@ mod tests {
                         2.0,
                     ),
                     stroke: Some(SlideStroke {
+                        join: None,
                         color: "#ff00ff".into(),
                         width: 2.0,
                         dashed: false,
@@ -2022,6 +2421,7 @@ mod tests {
         for asset_id in [None, Some("ppt/media/image1.png")] {
             let mut list = empty_list(100.0, 100.0);
             list.primitives.push(Primitive::Image {
+                geometry_fallback: false,
                 object_id: 1,
                 shape_id: None,
                 name: "picture".into(),
@@ -2097,6 +2497,7 @@ mod tests {
                     GeometryPathCommand::Line { x: 1.0, y: 1.0 },
                     GeometryPathCommand::Close,
                 ],
+                geometry_fallback: false,
                 adjust_values: Default::default(),
                 fill: Some(SlidePaint::Solid {
                     color: "#ff0000".into(),

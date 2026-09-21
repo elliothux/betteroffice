@@ -1,16 +1,15 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { PYTHON_BINDINGS } from './python-bindings.mjs';
-import { NODE_BINDINGS } from './node-bindings.mjs';
+import { NODE_BINDINGS, synchronizeNodeLoader, validateNodeVersions } from './node-bindings.mjs';
 import {
   RUST_CRATES,
+  STANDALONE_WORKSPACES,
   WORKSPACE_MANIFEST,
   cargoMetadata,
   run,
   rustReleaseVersion,
   validateRustTrain
 } from './rust-crates.mjs';
-
-const BINDINGS_MANIFEST = 'bindings/Cargo.toml';
 
 function releaseManifest(binding) {
   return `${binding}/package.json`;
@@ -20,7 +19,7 @@ function cargoManifest(binding) {
   return `${binding}/Cargo.toml`;
 }
 
-function pythonReleaseVersion(binding) {
+function bindingReleaseVersion(binding) {
   return JSON.parse(readFileSync(releaseManifest(binding), 'utf8')).version;
 }
 
@@ -31,8 +30,7 @@ function packageVersion(binding, source) {
   return version;
 }
 
-// pyproject reads its version from Cargo.toml, so this is the only file to rewrite.
-function synchronizePythonVersion(binding, source, from, to) {
+function synchronizeBindingVersion(binding, source, from, to) {
   if (packageVersion(binding, source) !== from) {
     throw new Error(`${binding} is not at ${from}`);
   }
@@ -77,32 +75,30 @@ function validate(version, locked) {
   validateRustTrain(metadata, version);
 }
 
-// Nothing else rewrites bindings/Cargo.lock, which pins every bumped crate by version.
-function synchronizeBindingsLock() {
-  cargoMetadata({ locked: false, manifestPath: BINDINGS_MANIFEST });
-  // Re-assert under `--locked`, the way CI reads the lock it just wrote.
-  cargoMetadata({ manifestPath: BINDINGS_MANIFEST });
+// Nothing else rewrites these lockfiles, which pin every bumped crate by version.
+function synchronizeStandaloneLocks() {
+  for (const workspace of STANDALONE_WORKSPACES) {
+    cargoMetadata({ locked: false, manifestPath: cargoManifest(workspace) });
+    // Re-assert under `--locked`, the way CI reads the lock it just wrote.
+    cargoMetadata({ manifestPath: cargoManifest(workspace) });
+  }
+}
+
+function synchronizeBunLock() {
+  run('bun', ['install', '--lockfile-only']);
 }
 
 const checkOnly = process.argv.includes('--check');
+validateNodeVersions();
 const before = rustReleaseVersion();
 const cargoBefore = readFileSync(WORKSPACE_MANIFEST, 'utf8');
-const pythonBefore = new Map(
-  PYTHON_BINDINGS.map((binding) => [binding, pythonReleaseVersion(binding)])
-);
-const nodeBefore = new Map(
-  NODE_BINDINGS.map((binding) => [binding, pythonReleaseVersion(binding)])
+const bindings = [...PYTHON_BINDINGS, ...NODE_BINDINGS];
+const bindingBefore = new Map(
+  bindings.map((binding) => [binding, bindingReleaseVersion(binding)])
 );
 
-for (const binding of PYTHON_BINDINGS) {
-  const marker = pythonBefore.get(binding);
-  const locked = packageVersion(binding, readFileSync(cargoManifest(binding), 'utf8'));
-  if (locked !== marker) {
-    throw new Error(`${binding} changeset marker is ${marker}, but Cargo is ${locked}`);
-  }
-}
-for (const binding of NODE_BINDINGS) {
-  const marker = nodeBefore.get(binding);
+for (const binding of bindings) {
+  const marker = bindingBefore.get(binding);
   const locked = packageVersion(binding, readFileSync(cargoManifest(binding), 'utf8'));
   if (locked !== marker) {
     throw new Error(`${binding} changeset marker is ${marker}, but Cargo is ${locked}`);
@@ -119,40 +115,29 @@ if (checkOnly) {
   if (workspaceVersion(simulated) !== '999.999.999') {
     throw new Error('Cargo release train version synchronization failed');
   }
-  for (const binding of PYTHON_BINDINGS) {
+  for (const binding of bindings) {
     const source = readFileSync(cargoManifest(binding), 'utf8');
-    const simulatedPython = synchronizePythonVersion(
+    const simulatedBinding = synchronizeBindingVersion(
       binding,
       source,
-      pythonBefore.get(binding),
+      bindingBefore.get(binding),
       '999.999.999'
     );
-    if (packageVersion(binding, simulatedPython) !== '999.999.999') {
-      throw new Error(`${binding} version synchronization failed`);
-    }
-  }
-  for (const binding of NODE_BINDINGS) {
-    const source = readFileSync(cargoManifest(binding), 'utf8');
-    const simulatedNode = synchronizePythonVersion(
-      binding,
-      source,
-      nodeBefore.get(binding),
-      '999.999.999'
-    );
-    if (packageVersion(binding, simulatedNode) !== '999.999.999') {
+    if (packageVersion(binding, simulatedBinding) !== '999.999.999') {
       throw new Error(`${binding} version synchronization failed`);
     }
   }
   validate(before, true);
-  cargoMetadata({ manifestPath: BINDINGS_MANIFEST });
+  for (const workspace of STANDALONE_WORKSPACES) {
+    cargoMetadata({ manifestPath: cargoManifest(workspace) });
+  }
   console.log(`Rust release train is synchronized at ${before}.`);
-  for (const binding of PYTHON_BINDINGS) {
-    console.log(`${binding} is synchronized at ${pythonBefore.get(binding)}.`);
+  for (const binding of bindings) {
+    console.log(`${binding} is synchronized at ${bindingBefore.get(binding)}.`);
   }
-  for (const binding of NODE_BINDINGS) {
-    console.log(`${binding} is synchronized at ${nodeBefore.get(binding)}.`);
+  for (const workspace of STANDALONE_WORKSPACES) {
+    console.log(`${workspace}/Cargo.lock is current.`);
   }
-  console.log('bindings/Cargo.lock is current.');
   process.exit(0);
 }
 
@@ -167,48 +152,41 @@ if (after !== before) {
   validate(after, false);
 }
 
-const pythonAfter = new Map(
-  PYTHON_BINDINGS.map((binding) => [binding, pythonReleaseVersion(binding)])
+const bindingAfter = new Map(
+  bindings.map((binding) => [binding, bindingReleaseVersion(binding)])
 );
-const nodeAfter = new Map(NODE_BINDINGS.map((binding) => [binding, pythonReleaseVersion(binding)]));
-for (const binding of PYTHON_BINDINGS) {
-  const from = pythonBefore.get(binding);
-  const to = pythonAfter.get(binding);
+for (const binding of bindings) {
+  const from = bindingBefore.get(binding);
+  const to = bindingAfter.get(binding);
   if (to === from) continue;
   writeFileSync(
     cargoManifest(binding),
-    synchronizePythonVersion(binding, readFileSync(cargoManifest(binding), 'utf8'), from, to)
+    synchronizeBindingVersion(binding, readFileSync(cargoManifest(binding), 'utf8'), from, to)
   );
 }
 for (const binding of NODE_BINDINGS) {
-  const from = nodeBefore.get(binding);
-  const to = nodeAfter.get(binding);
-  if (to !== from) {
-    writeFileSync(
-      cargoManifest(binding),
-      synchronizePythonVersion(binding, readFileSync(cargoManifest(binding), 'utf8'), from, to)
-    );
-  }
   run('bunx', ['napi', 'version', '--cwd', binding]);
+  const loader = `${binding}/index.js`;
+  writeFileSync(loader, synchronizeNodeLoader(
+    readFileSync(loader, 'utf8'), bindingBefore.get(binding), bindingAfter.get(binding)
+  ));
 }
 
+validateNodeVersions();
 validate(after, true);
-synchronizeBindingsLock();
-for (const binding of PYTHON_BINDINGS) {
-  const from = pythonBefore.get(binding);
-  const to = pythonAfter.get(binding);
+synchronizeStandaloneLocks();
+synchronizeBunLock();
+for (const binding of bindings) {
+  const from = bindingBefore.get(binding);
+  const to = bindingAfter.get(binding);
   console.log(
     to === from ? `${binding} remains at ${to}.` : `Synchronized ${binding} ${from} -> ${to}.`
   );
 }
-for (const binding of NODE_BINDINGS) {
-  const from = nodeBefore.get(binding);
-  const to = nodeAfter.get(binding);
-  console.log(
-    to === from ? `${binding} remains at ${to}.` : `Synchronized ${binding} ${from} -> ${to}.`
-  );
+for (const workspace of STANDALONE_WORKSPACES) {
+  console.log(`Synchronized ${workspace}/Cargo.lock.`);
 }
-console.log('Synchronized bindings/Cargo.lock.');
+console.log('Synchronized bun.lock.');
 console.log(
   after === before
     ? `Rust release train remains at ${after}.`

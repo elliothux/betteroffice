@@ -38,6 +38,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -161,10 +170,11 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "betteroffice-docx-edit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "regex",
  "ryu-js",
  "serde",
  "serde_json",
@@ -174,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-layout"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
@@ -187,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-parse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "betteroffice-drawingml",
@@ -204,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-raster"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "betteroffice-docx-layout",
@@ -217,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-drawingml"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "indexmap",
  "serde",
@@ -262,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-ooxml-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rustybuzz",
  "serde",
@@ -274,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-opc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "quick-xml",
  "zip",
@@ -282,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
@@ -292,10 +302,12 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-edit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "base64",
  "betteroffice-drawingml",
  "betteroffice-pptx-parse",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
@@ -305,8 +317,9 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-parse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "base64",
  "betteroffice-drawingml",
  "betteroffice-opc",
  "quick-xml",
@@ -316,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-raster"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
@@ -328,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
@@ -341,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-opc",
@@ -358,21 +371,21 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-calc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-xlsx-model",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-ops"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -381,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-parse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",
@@ -390,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-raster"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-xlsx-render",
  "png",
@@ -400,10 +413,11 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",
+ "hashbrown 0.17.1",
  "serde",
 ]
 
@@ -1220,6 +1234,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hermit-abi"
@@ -2325,6 +2344,35 @@ checksum = "f1c93da5bb2c5d4e6c0ef7abeead62c89169a0a4882bfb83ac892f2423aea2fe"
 dependencies = [
  "bitflags 2.13.1",
 ]
+
+[[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "renderdoc-sys"

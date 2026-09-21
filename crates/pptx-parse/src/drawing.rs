@@ -16,6 +16,8 @@ const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
 const ADJUSTMENT_SCALE: f64 = 100_000.0;
 /// `ST_TextPoint` bound: hundredths of a point, +/- 4000pt.
 const MAX_TEXT_SPACING_HUNDREDTHS: i32 = 400_000;
+/// Most `a:tab` stops one paragraph keeps.
+const MAX_TAB_STOPS: usize = 64;
 
 #[derive(Clone, Copy)]
 struct GuideValue {
@@ -42,6 +44,8 @@ impl GuideValue {
 pub(crate) struct CommonSlideData {
     pub name: Option<String>,
     pub background: Option<ShapeFill>,
+    pub background_picture: Option<Box<PictureFill>>,
+    pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
 }
 
@@ -56,9 +60,21 @@ pub(crate) fn common_slide_data(
     let name = common
         .and_then(|value| value.attribute("name"))
         .map(str::to_owned);
-    let background = common
-        .and_then(|value| value.child("bg"))
-        .and_then(parse_background);
+    let background_element = common.and_then(|value| value.child("bg"));
+    let background = background_element.and_then(parse_background);
+    let background_picture = background_element
+        .and_then(|value| value.child("bgPr"))
+        .and_then(|value| parse_picture_fill(value, relationships))
+        .map(Box::new);
+    let background_reference = background_element
+        .and_then(|value| value.child("bgRef"))
+        .map(|reference| StyleReference {
+            index: reference
+                .attribute("idx")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default(),
+            color: parse_color_container(reference),
+        });
     let mut shapes = if let Some(tree) = common.and_then(|value| value.child("spTree")) {
         parse_shape_children(tree, relationships, part, budget, elements)?
     } else {
@@ -68,6 +84,8 @@ pub(crate) fn common_slide_data(
     Ok(CommonSlideData {
         name,
         background,
+        background_picture,
+        background_reference,
         shapes,
     })
 }
@@ -841,6 +859,14 @@ fn parse_picture_fill(element: &XmlElement, relationships: &[Relationship]) -> O
     let fill = element
         .child_elements()
         .find(|child| is_fill_element(child))?;
+    picture_fill_element(fill, relationships)
+}
+
+/// Resolves one stretched `a:blipFill`, wherever it is declared.
+pub(crate) fn picture_fill_element(
+    fill: &XmlElement,
+    relationships: &[Relationship],
+) -> Option<PictureFill> {
     if fill.local_name() != "blipFill" || fill.child("tile").is_some() {
         return None;
     }
@@ -1311,10 +1337,30 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
                 .filter(|size| (100..=400_000).contains(size))
                 .map(|size| BulletSize::Points(size as f64 / 100.0))
         },
+        default_tab_size: numeric_attribute(Some(element), "defTabSz").filter(|size| *size > 0),
+        tab_stops: element.child("tabLst").map(parse_tab_stops),
         default_run: element
             .child("defRPr")
             .map(|value| parse_run_properties(Some(value))),
     }
+}
+
+/// `a:tabLst` positions in EMU, ascending. Only left stops are kept: the
+/// renderer advances to a position, so a centre, right or decimal stop would
+/// be placed as if it were left, and falling back to the default pitch is the
+/// smaller error. Negatives and duplicates drop, then the list is capped, so a
+/// hostile file cannot grow it and repeats cannot spend the allowance.
+fn parse_tab_stops(list: &XmlElement) -> Vec<i64> {
+    let mut stops = list
+        .children_named("tab")
+        .filter(|tab| matches!(tab.attribute("algn"), None | Some("l")))
+        .filter_map(|tab| numeric_attribute(Some(tab), "pos"))
+        .filter(|position| *position >= 0)
+        .collect::<Vec<_>>();
+    stops.sort_unstable();
+    stops.dedup();
+    stops.truncate(MAX_TAB_STOPS);
+    stops
 }
 
 fn parse_text_spacing(element: &XmlElement) -> Option<LineSpacing> {
@@ -1378,6 +1424,7 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),
+        caps: element.attribute("cap").and_then(TextCaps::from_attribute),
         font_family: element
             .child("latin")
             .and_then(|value| value.attribute("typeface"))
@@ -2090,6 +2137,34 @@ mod tests {
     }
 
     #[test]
+    fn a_run_reads_its_caps_token_and_refuses_junk() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let mut caps = Vec::new();
+        for token in ["all", "small", "none", "ALL", "bogus"] {
+            let element = parse_xml(
+                format!(r#"<a:rPr cap="{token}"/>"#).as_bytes(),
+                "ppt/slides/slide1.xml",
+                &mut budget,
+            )
+            .unwrap();
+            caps.push(parse_run_properties(Some(&element)).caps);
+        }
+        assert_eq!(
+            caps,
+            [
+                Some(TextCaps::All),
+                Some(TextCaps::Small),
+                Some(TextCaps::None),
+                None,
+                None
+            ]
+        );
+        let element = parse_xml(br#"<a:rPr/>"#, "ppt/slides/slide1.xml", &mut budget).unwrap();
+        assert_eq!(parse_run_properties(Some(&element)).caps, None);
+    }
+
+    #[test]
     fn reads_a_shape_list_style_into_its_text_body() {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
@@ -2720,6 +2795,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_paragraph_keeps_its_default_tab_size_and_sorted_tab_stops() {
+        let shapes = slide_shapes(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Tabbed"/><p:nvPr/></p:nvSpPr><p:txBody><a:bodyPr/><a:p><a:pPr defTabSz="457200"><a:tabLst><a:tab pos="914400" algn="l"/><a:tab pos="457200" algn="l"/><a:tab pos="-1"/><a:tab pos="914400"/></a:tabLst></a:pPr><a:r><a:t>A</a:t></a:r></a:p></p:txBody></p:sp>"#,
+            &ParseLimits::default(),
+        )
+        .unwrap();
+        let ShapeNode::Shape(shape) = &shapes[0] else {
+            panic!("expected shape");
+        };
+        let properties = &shape.text.as_ref().unwrap().paragraphs[0].properties;
+        assert_eq!(properties.default_tab_size, Some(457_200));
+        assert_eq!(
+            properties.tab_stops.as_deref(),
+            Some([457_200_i64, 914_400].as_slice())
+        );
+    }
+
+    #[test]
+    fn a_declared_empty_tab_list_is_not_an_absent_one() {
+        let shapes = slide_shapes(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Empty"/><p:nvPr/></p:nvSpPr><p:txBody><a:bodyPr/><a:p><a:pPr><a:tabLst/></a:pPr><a:r><a:t>A</a:t></a:r></a:p><a:p><a:r><a:t>B</a:t></a:r></a:p></p:txBody></p:sp>"#,
+            &ParseLimits::default(),
+        )
+        .unwrap();
+        let ShapeNode::Shape(shape) = &shapes[0] else {
+            panic!("expected shape");
+        };
+        let paragraphs = &shape.text.as_ref().unwrap().paragraphs;
+        assert_eq!(paragraphs[0].properties.tab_stops.as_deref(), Some(&[][..]));
+        assert_eq!(paragraphs[1].properties.tab_stops, None);
+        assert_eq!(paragraphs[1].properties.default_tab_size, None);
     }
 
     fn slide_shapes(body: &str, limits: &ParseLimits) -> Result<Vec<ShapeNode>, PptxError> {

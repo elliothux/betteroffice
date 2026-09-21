@@ -394,6 +394,8 @@ pub struct DocAttrs {
     pub modern_effects: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<TableMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_shape_atom: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -1522,7 +1524,6 @@ struct RunFormattingIn {
     #[serde(default)]
     horizontal_scale: Option<f64>,
     #[serde(default)]
-    #[allow(dead_code)]
     kerning_min_pt: Option<f64>,
     #[serde(default)]
     imprint: Option<bool>,
@@ -1713,6 +1714,8 @@ struct ImageRunIn {
     #[serde(default)]
     hyperlink: Option<HyperlinkIn>,
     #[serde(default)]
+    inline_shape: Option<Value>,
+    #[serde(default)]
     is_insertion: Option<bool>,
     #[serde(default)]
     is_deletion: Option<bool>,
@@ -1849,6 +1852,11 @@ pub(crate) struct ParaAttrsIn {
     /// `<w:pPr><w:rPr><w:del/>`: tracked deletion on the paragraph mark.
     #[serde(default)]
     p_pr_del: Option<RevisionInfoIn>,
+    /// `w:autoSpaceDE` / `w:autoSpaceDN` opt-outs; absent is the default (on).
+    #[serde(default, rename = "autoSpaceDE")]
+    auto_space_de: Option<bool>,
+    #[serde(default, rename = "autoSpaceDN")]
+    auto_space_dn: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -1926,6 +1934,10 @@ pub(crate) struct TableBlockIn {
     justification: Option<String>,
     #[serde(default)]
     indent: Option<f64>,
+    #[serde(default)]
+    compatibility_mode: Option<u8>,
+    #[serde(default)]
+    cell_margin_left: Option<f64>,
     #[serde(default)]
     caption: Option<String>,
     #[serde(default)]
@@ -2132,6 +2144,8 @@ pub(crate) struct ShapeBlockIn {
     pub(crate) position: Option<crate::types::ImageRunPosition>,
     #[serde(default)]
     pub(crate) behind_doc: Option<bool>,
+    #[serde(default)]
+    pub(crate) wrap_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2579,8 +2593,6 @@ pub(crate) struct LineIn {
     width: f64,
     #[serde(default)]
     ascent: f64,
-    #[serde(default)]
-    descent: f64,
     #[serde(default)]
     line_height: f64,
     #[serde(default)]
@@ -3092,6 +3104,17 @@ fn script_scale_of(fmt: &RunFormattingIn) -> f64 {
 
 fn effective_font_px_of(fmt: &RunFormattingIn) -> f64 {
     font_px_of(fmt) * script_scale_of(fmt)
+}
+
+/// Paint-side twin of the measurement kerning gate: Word applies pair kerning
+/// only above a nonzero `w:kern` threshold, so an absent one shapes `kern=0`.
+fn kern_features_of(fmt: &RunFormattingIn, size_px: f64) -> Vec<ooxml_text::ShapeFeature> {
+    ooxml_text::kern_features(fmt.kerning_min_pt.is_some_and(|threshold| {
+        ooxml_text::kern_enabled(
+            (size_px * 1.5).round() as u32,
+            (threshold * 2.0).round() as u32,
+        )
+    }))
 }
 
 fn fallback_scalar_count(text: &str, all_caps: Option<bool>) -> usize {
@@ -4972,7 +4995,7 @@ fn build_display_list_selected(
                 _ => {}
             }
         }
-        behind_objects.sort_by_key(BehindObject::relative_height);
+        behind_objects.sort_by_key(|object| (object.relative_height(), object.doc_order()));
         for object in behind_objects {
             match object {
                 BehindObject::Image {
@@ -5823,6 +5846,10 @@ fn emit_line(
 ) -> Option<LinePaintMetrics> {
     let segments = resolve_line_segments(&block.runs, line);
     let attrs = block.attrs.as_ref();
+    let auto_space = ooxml_text::AutoSpace::from_options(
+        attrs.and_then(|attrs| attrs.auto_space_de),
+        attrs.and_then(|attrs| attrs.auto_space_dn),
+    );
     let default_bidi_level = base_bidi_level(geom.is_rtl);
     let authoritative_items = authoritative_line_items(block, line, ctx, default_bidi_level);
     let authoritative_active = authoritative_items.is_some();
@@ -5939,9 +5966,9 @@ fn emit_line(
 
     let mut pen_x = geom.frag_x + pad_left + text_indent + left_offset + align_shift;
     let line_bottom = geom.line_top + line.line_height;
-    // baseline from the measured metrics with CSS half-leading centering
-    let half_leading = ((line.line_height - line.ascent - line.descent) / 2.0).max(0.0);
-    let baseline = geom.line_top + half_leading + line.ascent;
+    // Word hangs the baseline off the box top: whatever the spacing rule adds
+    // beyond ascent + descent is leading below the descent, never centered.
+    let baseline = geom.line_top + line.ascent;
 
     // Numbering is not part of the story text, so materialize the precomputed
     // marker as its own first-line primitive. The hanging-indent slot is its
@@ -6234,6 +6261,7 @@ fn emit_line(
                     line_bottom,
                     block_ref,
                     ctx.shape,
+                    auto_space,
                     item.field,
                 );
                 if item.pm_start.is_some() {
@@ -6319,6 +6347,60 @@ fn emit_line(
                 } else {
                     baseline - layout_height
                 };
+                if let Some(inline_value) = imr.inline_shape.as_ref()
+                    && let Ok(shape_block) =
+                        serde_json::from_value::<ShapeBlockIn>(inline_value.clone())
+                {
+                    let stamp_from = prims.len();
+                    let fragment = ShapeFragmentIn {
+                        block_id: shape_block.id.clone(),
+                        x: pen_x,
+                        y,
+                        width: layout_width,
+                        height: layout_height,
+                        doc_start: *pm_start,
+                        doc_end: *pm_end,
+                        pm_start: *pm_start,
+                        pm_end: *pm_end,
+                        is_anchored: None,
+                        z_index: None,
+                    };
+                    emit_shape_fragment(prims, &fragment, &shape_block, ctx);
+                    for primitive in &mut prims[stamp_from..] {
+                        if let Some(attrs) = doc_attrs_mut(primitive) {
+                            attrs.inline_shape_atom = Some(true);
+                            stamp_hyperlink_attrs(
+                                attrs,
+                                imr.hyperlink.as_ref(),
+                                imr.hlink_href.as_deref(),
+                            );
+                            attrs.logical_order = attrs.logical_order.or(*logical_order);
+                            attrs.bidi_level =
+                                attrs.bidi_level.or_else(|| logical_order.map(|_| *level));
+                            if imr.is_insertion == Some(true) || imr.is_deletion == Some(true) {
+                                attrs.revision = Some(Revision {
+                                    author: imr.change_author.clone().unwrap_or_default(),
+                                    date: imr.change_date.clone().unwrap_or_default(),
+                                    revision_id: imr
+                                        .change_revision_id
+                                        .map(|id| id.to_string())
+                                        .unwrap_or_default(),
+                                    kind: if imr.is_insertion == Some(true) {
+                                        RevisionKind::Ins
+                                    } else {
+                                        RevisionKind::Del
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    if imr.display_mode.as_deref() != Some("block")
+                        && imr.wrap_type.as_deref() != Some("topAndBottom")
+                    {
+                        pen_x += layout_width;
+                    }
+                    continue;
+                }
                 let rot = imr
                     .rotation_deg
                     .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
@@ -6596,6 +6678,7 @@ fn emit_text_segment(
     line_bottom: f64,
     block_ref: &BlockRef,
     shape: Option<&ShapeFonts<'_>>,
+    auto_space: ooxml_text::AutoSpace,
     field: Option<&FieldRunIn>,
 ) {
     let font_px = effective_font_px_of(fmt);
@@ -6764,6 +6847,7 @@ fn emit_text_segment(
             &attrs,
             &color,
             &paint_clip,
+            auto_space,
         ),
         None => false,
     };
@@ -6882,6 +6966,7 @@ fn try_emit_glyph_runs(
     attrs: &DocAttrs,
     color: &str,
     paint_clip: &Option<ClipRect>,
+    auto_space: ooxml_text::AutoSpace,
 ) -> bool {
     if text.is_empty() {
         return false;
@@ -6902,6 +6987,7 @@ fn try_emit_glyph_runs(
     }
 
     let size_px = effective_font_px_of(fmt);
+    let features = kern_features_of(fmt, size_px);
     let ws_px = word_spacing.as_ref().map(num_f64).unwrap_or(0.0);
     let direction = shape_direction_for_level(bidi_level);
     let rtl = if direction == ooxml_text::ShapeDirection::Rtl {
@@ -6989,6 +7075,22 @@ fn try_emit_glyph_runs(
     let mut local: Vec<Primitive> = Vec::new();
     let mut acc = 0.0_f64; // pen advance from the segment origin `x`
     let segment_count = segments.len();
+    // East Asian auto-space (`w:autoSpaceDE` / `w:autoSpaceDN`): the measure
+    // pass already widened the cluster before each boundary, so the pen has to
+    // widen with it or the segment's `exact_width` reconciliation would dump
+    // every boundary's gap onto its last glyph. A boundary that falls between
+    // two same-font subranges is spaced from the next subrange's first
+    // character. RTL never mixes with East Asian text here, so it is left out.
+    let auto_space_active =
+        auto_space.any() && direction != ooxml_text::ShapeDirection::Rtl && segment_count > 0;
+    let subrange_first: Vec<Option<char>> = if auto_space_active {
+        segments
+            .iter()
+            .map(|segment| segment.text.chars().next())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let range_order: Box<dyn Iterator<Item = usize>> =
         if direction == ooxml_text::ShapeDirection::Rtl {
             Box::new((0..segment_count).rev())
@@ -7010,7 +7112,7 @@ fn try_emit_glyph_runs(
             font,
             &sub_text,
             size_px as f32,
-            &[],
+            &features,
             direction,
         ) {
             Ok(g) => g,
@@ -7018,12 +7120,41 @@ fn try_emit_glyph_runs(
         };
 
         let sub_bytes = sub_text.as_bytes();
+        let auto_gaps: Vec<(usize, f64)> = if auto_space_active {
+            let mut gaps = Vec::new();
+            let mut chars = sub_text.char_indices().peekable();
+            while let Some((offset, ch)) = chars.next() {
+                let next = chars
+                    .peek()
+                    .map(|&(_, next)| next)
+                    .or_else(|| subrange_first.get(range_index + 1).copied().flatten());
+                let Some(next) = next else { break };
+                let extra = auto_space.extra_px(ch, next, size_px as f32, size_px as f32) as f64;
+                if extra > 0.0 {
+                    gaps.push((offset, extra));
+                }
+            }
+            gaps
+        } else {
+            Vec::new()
+        };
         let mut placed: Vec<PlacedGlyph> = Vec::with_capacity(glyphs.len());
-        for g in &glyphs {
+        for (index, g) in glyphs.iter().enumerate() {
             // Fold the justified U+0020 stretch into the glyph advance.
             let mut advance = g.x_advance as f64;
             if ws_px != 0.0 && sub_bytes.get(g.cluster as usize) == Some(&b' ') {
                 advance += ws_px;
+            }
+            if !auto_gaps.is_empty() {
+                let cluster_end = glyphs
+                    .get(index + 1)
+                    .map(|next| next.cluster as usize)
+                    .unwrap_or(sub_bytes.len());
+                advance += auto_gaps
+                    .iter()
+                    .filter(|(offset, _)| *offset >= g.cluster as usize && *offset < cluster_end)
+                    .map(|(_, extra)| extra)
+                    .sum::<f64>();
             }
             placed.push(PlacedGlyph {
                 id: g.glyph_id,
@@ -7638,6 +7769,15 @@ impl BehindObject<'_> {
         }
         .unwrap_or(0)
     }
+
+    /// Tie-break for equal ranks: document order.
+    fn doc_order(&self) -> i64 {
+        match self {
+            Self::Image { image, .. } => image.pm_start,
+            Self::Shape { fragment, block } => fragment.pm_start.or(block.pm_start),
+        }
+        .unwrap_or(i64::MAX)
+    }
 }
 
 /// Emits a paragraph's floating image runs at their resolved page rectangles.
@@ -7663,6 +7803,14 @@ fn emit_paragraph_floating_images(
     }
 }
 
+/// Word clamps a text-wrapping float into its page and leaves `wrapNone` free.
+fn clamp_wrapped_float_y(y: f64, height: f64, wrap: Option<&str>, page_height: f64) -> f64 {
+    if !matches!(wrap, Some("square" | "tight" | "through" | "topAndBottom")) {
+        return y;
+    }
+    y.min(page_height - height).max(0.0)
+}
+
 fn emit_floating_image(
     prims: &mut Vec<Primitive>,
     block: &ParagraphBlockIn,
@@ -7673,12 +7821,17 @@ fn emit_floating_image(
     let block_ref = BlockRef::of(&block.id);
     let (x, y) = resolve_anchored_position(imr, frag_y - geom.margin_top, geom);
     let page_x = geom.margin_left + x;
-    let page_y = geom.margin_top + y;
     let rot = imr
         .rotation_deg
         .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
     let layout_width = image_layout_width(imr);
     let layout_height = image_layout_height(imr);
+    let page_y = clamp_wrapped_float_y(
+        geom.margin_top + y,
+        layout_height,
+        imr.wrap_type.as_deref(),
+        geom.page_height,
+    );
     let mut attrs = block_ref.attrs();
     attrs.doc_start = imr.pm_start;
     attrs.doc_end = imr.pm_end;
@@ -8596,6 +8749,8 @@ fn nested_table_x_offset(block: &TableBlockIn, measure: &TableExtentIn, content_
         block.floating.as_ref(),
         block.justification.as_deref(),
         block.indent,
+        block.compatibility_mode,
+        block.cell_margin_left,
         table_total_width(measure),
         content_width,
     )
@@ -9271,6 +9426,14 @@ fn emit_cell_content(
                 block_tops.push(stack_cursor);
                 stack_cursor += text_box.height;
                 prev_after = 0.0;
+            }
+            (BlockIn::Shape(sb), Some(MeasureIn::Shape(_)))
+                if crate::cell_layout::cell_overlay_drawing(
+                    sb.position.is_some(),
+                    sb.wrap_type.as_deref(),
+                ) =>
+            {
+                block_tops.push(stack_cursor);
             }
             (BlockIn::Shape(_), Some(MeasureIn::Shape(sm)))
             | (BlockIn::Chart(_), Some(MeasureIn::Chart(sm))) => {
@@ -10329,6 +10492,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_wrapping_float_is_clamped_to_the_page_and_wrap_none_is_not() {
+        // Word 16.112 on a 792 pt page, 100 pt float: a wrapSquare anchor at
+        // 720.4 / 775.6 / 830.8 all render at 692; wrapNone renders where the
+        // anchor puts it and vanishes once it clears the sheet.
+        for square in [720.38, 775.57, 830.8] {
+            assert_eq!(
+                clamp_wrapped_float_y(square, 100.0, Some("square"), 792.0),
+                692.0
+            );
+            assert_eq!(
+                clamp_wrapped_float_y(square, 100.0, Some("inFront"), 792.0),
+                square
+            );
+        }
+        assert_eq!(
+            clamp_wrapped_float_y(665.18, 100.0, Some("square"), 792.0),
+            665.18
+        );
+        assert_eq!(
+            clamp_wrapped_float_y(-34.8, 100.0, Some("square"), 792.0),
+            0.0
+        );
+        assert_eq!(
+            clamp_wrapped_float_y(665.18, 900.0, Some("square"), 792.0),
+            0.0
+        );
+    }
+
+    #[test]
     fn resident_adapter_normalizes_integral_json_numbers() {
         let mut value = serde_json::json!({
             "pmStart": 16.0,
@@ -10678,9 +10870,9 @@ mod tests {
     #[test]
     fn header_footer_spacing_collapses_and_short_footers_anchor_to_their_height() {
         for (kind, height, spacings, expected) in [
-            ("header", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![59.0, 87.0]),
-            ("footer", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![420.0, 448.0]),
-            ("footer", 20.0, [(0.0, 0.0), (0.0, 0.0)], vec![454.0]),
+            ("header", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![56.0, 84.0]),
+            ("footer", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![417.0, 445.0]),
+            ("footer", 20.0, [(0.0, 0.0), (0.0, 0.0)], vec![451.0]),
         ] {
             let count = expected.len();
             let measured: Vec<Value> = spacings.into_iter().take(count).enumerate().map(|(i,(before,after))|json!({
@@ -11355,5 +11547,119 @@ mod tests {
             ..Default::default()
         };
         assert!(plot_labels_from(None, Some(&series_only)).is_none());
+    }
+
+    #[test]
+    fn inline_shape_paints_native_geometry_children_and_paint() {
+        let inline_shape = json!({
+            "id": "shape:inline-test",
+            "shapeType": "rect",
+            "geometryPath": [
+                {"type": "move", "x": 0.1, "y": 0.2},
+                {"type": "line", "x": 0.9, "y": 0.8},
+                {"type": "close"}
+            ],
+            "fill": {"type": "solid", "color": "#112233"},
+            "stroke": {"color": "#445566", "width": 2.5, "dash": "dash"},
+            "transform": {"rotation": 12.0, "flipH": true},
+            "width": 60.0,
+            "height": 18.0,
+            "children": [{
+                "id": "shape:inline-test:child:0",
+                "shapeType": "ellipse",
+                "geometryPath": [
+                    {"type": "move", "x": 0.0, "y": 0.0},
+                    {"type": "line", "x": 1.0, "y": 1.0}
+                ],
+                "width": 10.0,
+                "height": 8.0,
+                "x": 5.0,
+                "y": 4.0
+            }],
+            "title": "Oval callout",
+            "pmStart": 2,
+            "pmEnd": 3
+        });
+        let input = json!({
+            "contractVersion": 1,
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "inline-para",
+                    "runs": [
+                        {"kind": "text", "text": "A", "pmStart": 1, "pmEnd": 2},
+                        {
+                            "kind": "image",
+                            "src": "",
+                            "width": 60.0,
+                            "height": 18.0,
+                            "wrapType": "inline",
+                            "displayMode": "inline",
+                            "cssFloat": "none",
+                            "pmStart": 2,
+                            "pmEnd": 3,
+                            "inlineShape": inline_shape
+                        },
+                        {"kind": "text", "text": "B", "pmStart": 3, "pmEnd": 4}
+                    ],
+                    "pmStart": 0,
+                    "pmEnd": 5
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "totalHeight": 22,
+                    "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 2, "tailChar": 1,
+                        "width": 120, "ascent": 16, "descent": 6, "lineHeight": 22
+                    }]
+                }
+            }],
+            "options": {},
+            "layout": {"pages": [{"number": 1, "size": {"w": 400, "h": 400},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20},
+                "fragments": [{"kind": "paragraph", "blockId": "inline-para", "x": 20, "y": 20,
+                    "width": 360, "height": 22, "fromLine": 0, "toLine": 1,
+                    "pmStart": 0, "pmEnd": 5}]
+            }]}
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let primitives = output["pages"][0]["primitives"].as_array().unwrap();
+        assert!(
+            !primitives
+                .iter()
+                .any(|primitive| primitive["kind"] == "image" && primitive["relId"] == ""),
+            "no empty placeholder image"
+        );
+        let shapes: Vec<_> = primitives
+            .iter()
+            .filter(|primitive| primitive["kind"] == "shape")
+            .collect();
+        assert_eq!(
+            shapes.len(),
+            2,
+            "parent plus one child, not first-child only"
+        );
+        let parent = shapes
+            .iter()
+            .find(|primitive| primitive["blockKey"] == "shape:inline-test")
+            .expect("parent shape with original id");
+        assert_eq!(parent["fill"], "#112233");
+        assert_eq!(parent["stroke"]["color"], "#445566");
+        assert_eq!(parent["ariaLabel"], "Oval callout");
+        assert_eq!(parent["docStart"], 2);
+        assert_eq!(parent["docEnd"], 3);
+        let path = parent["geometryPath"].as_array().unwrap();
+        assert_eq!(path.len(), 3, "custom path preserved, not preset rect");
+        assert_eq!(path[0]["type"], "move");
+        assert_eq!(path[1]["type"], "line");
+        assert_eq!(path[2]["type"], "close");
+        assert!(parent["transform"]["flipH"] == true);
+        let child = shapes
+            .iter()
+            .find(|primitive| primitive["blockKey"] == "shape:inline-test:child:0")
+            .expect("child shape with original id");
+        assert!(child.get("docStart").is_none());
+        assert!(child.get("docEnd").is_none());
     }
 }

@@ -256,6 +256,30 @@ impl DocumentRegions {
             .map_or(16.0, twips_to_pixels)
     }
 
+    /// Document-grid snap pitch in pixels for line-height snapping
+    /// (`w:docGrid`, §17.6.5), or `None` when the grid is inactive.
+    ///
+    /// Activation is narrow: only grid types `lines`, `linesAndChars` and
+    /// `snapToChars` with a finite positive `linePitch` snap. `default` (or
+    /// a bare `linePitch` with no type, as many English corpus documents
+    /// carry) yields `None`, leaving those files completely unaffected.
+    pub fn doc_grid_snap_pitch_px(&self, section_index: usize) -> Option<f64> {
+        self.sections
+            .get(section_index)
+            .or_else(|| self.sections.last())
+            .and_then(|section| section.properties.as_ref())
+            .and_then(|properties| properties.doc_grid.as_ref())
+            .filter(|grid| {
+                matches!(
+                    grid.get("type").and_then(Value::as_str),
+                    Some("lines" | "linesAndChars" | "snapToChars")
+                )
+            })
+            .and_then(|grid| grid.get("linePitch").and_then(Value::as_f64))
+            .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
+            .map(twips_to_pixels)
+    }
+
     pub fn footnote_columns(&self, section_index: usize) -> u64 {
         self.sections
             .get(section_index)
@@ -1129,7 +1153,7 @@ mod tests {
     #[test]
     fn section_restart_parity_survives_incremental_page_resume() {
         let (mut input, _) = restart_parity_input(true, Some(1), 2, None, 2);
-        let previous = crate::place::layout_document_checkpointed(&mut input).unwrap();
+        let mut previous = crate::place::layout_document_checkpointed(&mut input).unwrap();
         assert_eq!(previous.layout.pages.len(), 4);
         let before = vec![0; input.measured.len()];
         let mut after = before.clone();
@@ -1141,7 +1165,7 @@ mod tests {
         paragraph.total_height = 30.0;
         let incremental = crate::place::layout_document_incremental(
             &mut input,
-            &previous.layout,
+            &mut previous.layout,
             &previous.checkpoints,
             &before,
             &after,

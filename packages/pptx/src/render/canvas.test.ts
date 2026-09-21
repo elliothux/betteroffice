@@ -8,7 +8,15 @@ import type {
   TablePrimitive,
   TextBoxPrimitive,
 } from '../types';
-import { applyImageEffects, paintSlide } from './canvas';
+import { applyImageEffects, paintSlide, sizeCanvasForSlide } from './canvas';
+
+test('sizes the backing store to cover a slide whose page is a fractional pixel', () => {
+  const canvas = { width: 0, height: 0, style: { width: '', height: '' } };
+  sizeCanvasForSlide(canvas, { width: 1122.6666, height: 793.3333 }, 150 / 96);
+  expect([canvas.width, canvas.height]).toEqual([1755, 1240]);
+  sizeCanvasForSlide(canvas, { width: 1280, height: 720 }, 150 / 96);
+  expect([canvas.width, canvas.height]).toEqual([2000, 1125]);
+});
 
 describe('PPTX canvas replay', () => {
   test('paints shape geometry and positioned text in display-list order', async () => {
@@ -779,6 +787,39 @@ describe('PPTX picture cropping', () => {
     expect(calls).not.toContain('clip');
   });
 
+  test('a picture the host cannot decode still leaves the rest of the slide painted', async () => {
+    const { calls, ctx } = harness();
+    const display = {
+      contractVersion: 1,
+      width: 320,
+      height: 180,
+      primitives: [
+        {
+          kind: 'image', objectId: 1, name: 'Metafile', x: 10, y: 20, w: 100, h: 50,
+          assetId: 'ppt/media/image1.emf', stroke: { color: '#ff00ff', width: 2 },
+        },
+        {
+          kind: 'image', objectId: 2, name: 'Screenshot', x: 10, y: 90, w: 200, h: 100,
+          assetId: 'ppt/media/image2.png',
+        },
+      ],
+    } as SlideDisplayList;
+    const attempted: string[] = [];
+    await paintSlide(ctx, display, 1, 1, {
+      resolveImage: async (assetId) => {
+        attempted.push(assetId);
+        if (assetId.endsWith('.emf'))
+          throw new Error('The source image could not be decoded.');
+        return source;
+      },
+    });
+    expect(attempted).toEqual(['ppt/media/image1.emf', 'ppt/media/image2.png']);
+    expect(calls).toContain('draw:0,0,400,300,10,90,200,100');
+    expect(calls.filter((call) => call.startsWith('draw:'))).toHaveLength(1);
+    expect(calls).toContain('rect:10,20,100,50');
+    expect(calls).toContain('stroke');
+  });
+
   test('a two-contour mask keeps both contours, so a counter can be punched out', async () => {
     const { calls, ctx } = harness();
     const ring: GeometryPathCommand[] = [
@@ -916,6 +957,64 @@ describe('PPTX shape shadows', () => {
         'main:shadow:blur(12px):126,126', 'main:fill', 'main:stroke',
       ]);
       expect(ctx.filter).toBe('none');
+    } finally { restore(); }
+  });
+
+  test('layered fills share one shadow mask and one budget charge', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
+    try {
+      const display = list({ color: '#00000066' });
+      const shape = display.primitives[0] as ShapePrimitive;
+      shape.stroke = undefined;
+      shape.shadow!.paths = [
+        { path: shape.path, fill: true }, { path: shape.path, fill: true },
+      ];
+      await paintSlide(ctx, display, 3, 1, { maxShadowPixels: 120 * 120 });
+      expect(surfaces).toEqual([[120, 120]]);
+      expect(calls).toEqual([
+        'mask:fill', 'mask:fill', 'mask:tint:source-in:#00000066',
+        'main:shadow:blur(0px):120,120', 'main:fill',
+      ]);
+    } finally { restore(); }
+  });
+
+  test('an empty first layer still casts the later open stroke shadow', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
+    try {
+      const display = list({ color: '#00000066' });
+      const shape = display.primitives[0] as ShapePrimitive;
+      shape.shadow!.paths = [{ path: shape.path.slice(0, 4), fill: false, stroke: shape.stroke }];
+      shape.fill = undefined;
+      shape.stroke = undefined;
+      await paintSlide(ctx, display, 3, 1);
+      expect(surfaces).toHaveLength(1);
+      expect(calls).toEqual([
+        'mask:stroke', 'mask:tint:source-in:#00000066', 'main:shadow:blur(0px):108,108',
+      ]);
+    } finally { restore(); }
+  });
+
+  test('picture layers combine bitmap alpha before tinting their shadow', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
+    try {
+      const shape = list(undefined).primitives[0] as ShapePrimitive;
+      const display: SlideDisplayList = {
+        contractVersion: 1, width: 160, height: 160,
+        primitives: [{
+          kind: 'image', objectId: 2, name: 'mark', x: 40, y: 40, w: 40, h: 40,
+          assetId: 'mark', shadow: { color: '#00000066', paths: [
+            { path: shape.path, fill: true }, { path: shape.path, fill: true },
+          ] },
+        }],
+      };
+      await paintSlide(ctx, display, 3, 1, {
+        resolveImage: () => ({} as CanvasImageSource), maxShadowPixels: 120 * 120,
+      });
+      expect(surfaces).toEqual([[120, 120]]);
+      expect(calls).toEqual([
+        'mask:shadow:none:40,40', 'mask:shadow:none:40,40', 'mask:tint:source-in:#00000066',
+        'main:shadow:blur(0px):120,120', 'main:shadow:none:40,40',
+      ]);
     } finally { restore(); }
   });
 
@@ -1690,4 +1789,23 @@ test('keeps inline revision marks inside their run at bidi boundaries and applie
   await paintSlide(ctx, frame, 2, 0.5, { textChanges: [{ storyId: 'mixed', start: 0, end: 2, kind: 'deletion' }] });
   expect(rectangles).toEqual([{ x: 0, width: 20, color: '#fee2e2cc' }, { x: 0, width: 20, color: '#b91c1c' }]);
   expect(rotations).toEqual([Math.PI / 6, Math.PI / 6]);
+});
+
+test('stroke joins follow each shape and reset for legacy display lists', async () => {
+  const joins: string[] = [];
+  const state: Record<string, any> = {};
+  const ctx = new Proxy(state, {
+    get: (target, key) => key === 'stroke'
+      ? () => joins.push(target.lineJoin)
+      : target[key as string] ?? (() => undefined),
+    set: (target, key, value) => { target[key as string] = value; return true; },
+  }) as CanvasRenderingContext2D;
+  const primitives: ShapePrimitive[] = (['round', 'bevel', undefined] as const).map((join, index) => ({
+    kind: 'shape', objectId: index, name: 'Tip', geometry: 'swooshArrow',
+    x: index * 20, y: 0, w: 20, h: 20,
+    path: [{ type: 'move', x: 0, y: 1 }, { type: 'line', x: 1, y: 0 }],
+    stroke: { color: '#000000', width: 1, join },
+  }));
+  await paintSlide(ctx, { contractVersion: 1, width: 60, height: 20, primitives }, 1, 1);
+  expect(joins).toEqual(['round', 'bevel', 'miter']);
 });

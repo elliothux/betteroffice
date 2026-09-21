@@ -39,14 +39,27 @@ export interface SlideCanvasLike {
   style: { width: string; height: string };
 }
 
+/** The backing store a slide needs: a fractional extent covers its last pixel. */
+export function slideBackingStore(
+  list: Pick<SlideDisplayList, 'width' | 'height'>,
+  dpr: number,
+  scale = 1
+): { width: number; height: number } {
+  return {
+    width: Math.ceil(list.width * scale * dpr),
+    height: Math.ceil(list.height * scale * dpr),
+  };
+}
+
 export function sizeCanvasForSlide(
   canvas: SlideCanvasLike,
   list: Pick<SlideDisplayList, 'width' | 'height'>,
   dpr: number,
   scale = 1
 ): void {
-  canvas.width = Math.round(list.width * scale * dpr);
-  canvas.height = Math.round(list.height * scale * dpr);
+  const store = slideBackingStore(list, dpr, scale);
+  canvas.width = store.width;
+  canvas.height = store.height;
   canvas.style.width = `${list.width * scale}px`;
   canvas.style.height = `${list.height * scale}px`;
 }
@@ -147,7 +160,7 @@ function paintShape(
     buildPath(ctx, shape.clip, shape.x, shape.y, shape.w, shape.h);
     ctx.clip();
   }
-  if (shape.shadow && (shape.fill || shape.stroke)) {
+  if (shape.shadow && (shape.fill || shape.stroke || shape.shadow.paths?.some((part) => part.stroke))) {
     paintShadowedShape(ctx, shape, deviceScale, shadowBudget);
   }
   buildPath(ctx, shape.path, shape.x, shape.y, shape.w, shape.h);
@@ -167,14 +180,20 @@ function paintShadowedShape(
   deviceScale: number,
   shadowBudget: ShadowBudget
 ): void {
+  const parts: ShapePrimitive[] = shape.shadow?.paths?.length
+    ? shape.shadow.paths.map((part) => ({ ...shape, path: part.path,
+        fill: part.fill ? shape.fill : undefined, stroke: part.stroke, shadow: undefined }))
+    : [{ ...shape, shadow: undefined }];
   paintShadowLayer(
     ctx,
     shape.shadow!,
-    pathPoints(shape.path, shape),
-    shape.stroke?.width ?? 0,
+    parts.flatMap((part) => pathPoints(part.path, part)),
+    parts.reduce((reach, part) => Math.max(reach, part.stroke?.width ?? 0), 0),
     deviceScale,
     shadowBudget,
-    (scratch) => paintShape(scratch, { ...shape, shadow: undefined }, deviceScale, shadowBudget)
+    (scratch) => {
+      for (const part of parts) paintShape(scratch, part, deviceScale, shadowBudget);
+    }
   );
 }
 
@@ -486,6 +505,7 @@ function strokeCurrentPath(
   ctx.strokeStyle = stroke.paint ? paintStyle(ctx, stroke.paint, x, y, width, height) : stroke.color;
   ctx.lineWidth = stroke.width;
   ctx.setLineDash(stroke.dashed ? [Math.max(3, stroke.width * 2), Math.max(2, stroke.width)] : []);
+  ctx.lineJoin = stroke.join ?? 'miter';
   ctx.stroke();
 }
 
@@ -524,21 +544,39 @@ async function paintImage(
 ): Promise<void> {
   let source: CanvasImageSource | undefined;
   if (image.assetId && resolver) {
-    const resolved = await resolver(image.assetId);
+    const resolved = await resolveSource(resolver, image.assetId);
     if (resolved) source = image.effects?.length ? recolourImage(resolved, image.effects) : resolved;
   }
-  if (image.shadow && (source || image.stroke)) {
+  if (image.shadow && (source || image.stroke || image.shadow.paths?.some((part) => part.stroke))) {
+    const parts = image.shadow.paths?.length
+      ? image.shadow.paths.map((part) => ({ image: { ...image, path: part.path, stroke: part.stroke },
+          source: part.fill ? source : undefined }))
+      : [{ image, source }];
     paintShadowLayer(
       ctx,
       image.shadow,
-      imagePoints(image),
-      image.stroke?.width ?? 0,
+      parts.flatMap((part) => imagePoints(part.image)),
+      parts.reduce((reach, part) => Math.max(reach, part.image.stroke?.width ?? 0), 0),
       deviceScale,
       shadowBudget,
-      (scratch) => drawImageContent(scratch, image, source)
+      (scratch) => {
+        for (const part of parts) drawImageContent(scratch, part.image, part.source);
+      }
     );
   }
   drawImageContent(ctx, image, source);
+}
+
+/** Media the host cannot decode leaves the picture blank and the rest of the slide intact. */
+async function resolveSource(
+  resolver: CanvasImageResolver,
+  assetId: string
+): Promise<CanvasImageSource | null> {
+  try {
+    return await resolver(assetId);
+  } catch {
+    return null;
+  }
 }
 
 function drawImageContent(

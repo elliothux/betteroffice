@@ -16,20 +16,24 @@
 //!   font-bearing contribution claims it, and only a strictly larger size
 //!   displaces it. Ascent, descent and leading are per-contribution maxima,
 //!   so even a text run with no characters raises the line box. A line with
-//!   no font-bearing run at all falls back to a 0.8/0.2 em ascent/descent
+//!   no font-bearing run at all takes the paragraph mark's face, as Word
+//!   does, and only without one falls back to a 0.8/0.2 em ascent/descent
 //!   split on a [`DEFAULT_SINGLE_LINE_RATIO`] basis.
 //! - The emitted `ascent`/`descent` are the *spacing-ruled* pair, not the raw
 //!   content metrics, so `ascent + descent <= lineHeight` always holds: an
 //!   `exact`, floored `atLeast` or sub-single box moves the pair rather than
 //!   overflowing the box. An image-grown line overrides both and the
 //!   identity still holds.
-//! - A tall inline image sits on the baseline with text descent below it.
+//! - A tall inline image sits on the baseline with text descent below it;
+//!   alone on its line it takes the image's own height and nothing more.
 //!   Block images retain a descent buffer above and below their footprint.
 //! - Float geometry is probed per line at the running Y with a fixed
-//!   default-font-size estimate, never the line's real metrics, which are
-//!   unknown until the line closes. That running Y advances by each line's
-//!   *text* height, so image growth never shifts the next probe; float skips
-//!   do, since they move the line itself.
+//!   default-font-size estimate, then re-tested against `fullWidthBlock` bands
+//!   once the line closes and its box is known. That running Y advances by each
+//!   line's *text* height, so image growth never shifts the next probe; float
+//!   skips do, since they move the line itself. The first line's box reaches up
+//!   to the paragraph top, so `spacing.before` is tested with it and spent
+//!   again below whatever the line clears.
 //! - `totalHeight` is Σ (line height + `floatSkipBefore`) plus
 //!   `spacing.before` and `spacing.after`.
 
@@ -68,6 +72,9 @@ pub(super) struct FillParams<'a> {
     pub first_line_width: f32,
     /// Default font size used to seed line metrics.
     pub default_font_size_pt: f32,
+    /// The paragraph mark's own face and size, used for a line that ends up
+    /// carrying no font-bearing run. `None` falls back to a synthetic box.
+    pub mark_font: Option<(FontId, f32)>,
     pub compat: &'a CompatIn,
     /// Custom tab stops (`attrs.tabs`), positions in twips.
     pub tabs: &'a [TabStopIn],
@@ -81,6 +88,16 @@ pub(super) struct FillParams<'a> {
     /// Paragraph Y in the floating-zone coordinate space.
     pub paragraph_y_offset: f32,
     pub authoritative_shaping: bool,
+    /// Grid pitch in px for snap-to-grid (`w:docGrid w:linePitch`), already
+    /// gated to an activating grid type AND the paragraph opt-out (`None`
+    /// disables snapping). The filler additionally requires an `auto`
+    /// spacing rule. Per-line run opt-outs in `run_snaps` can still
+    /// disable individual lines.
+    pub snap_pitch_px: Option<f32>,
+    /// Per prepared run (index-aligned with `prepared`): whether the run
+    /// allows grid snapping (`w:snapToGrid`, default on). A line containing
+    /// any disallowing run does not snap.
+    pub run_snaps: &'a [bool],
 }
 
 /// The line currently being filled. Reset wholesale by `start_new_line`.
@@ -140,31 +157,54 @@ struct Filler<'a> {
     pending_float_skip: f32,
 }
 
+/// Paragraph space-before in px, floored at zero.
+fn space_before(p: &FillParams) -> f32 {
+    p.spacing
+        .and_then(|spacing| spacing.before)
+        .unwrap_or(0.0)
+        .max(0.0)
+}
+
+/// Absolute top of the box a line is tested against. `cumulative` counts from
+/// the paragraph's text top, so space-before is added back; `lead` is the part
+/// of that space the box reclaims, which is all of it for the first line.
+fn float_probe_top(p: &FillParams, cumulative: f32, lead: f32) -> f32 {
+    p.paragraph_y_offset + cumulative + space_before(p) - lead
+}
+
 /// Hops the running Y past any float leaving less than
-/// [`floats::MIN_WRAP_SEGMENT_WIDTH`] of usable room. The skipped pixels are
-/// added to both the running Y and the pending `floatSkipBefore`.
+/// [`floats::MIN_WRAP_SEGMENT_WIDTH`] of usable room. `lead` extends the probe
+/// box up to the paragraph top for the first line: Word tests space-before
+/// together with that line and spends it again below whatever the line clears.
+/// The skipped pixels are added to both the running Y and the pending
+/// `floatSkipBefore`. Returns the line's resolved top, which callers resolve
+/// margins at — derived from the hop, not re-added, so a line landing on a
+/// zone edge does not round back inside it.
 fn skip_obstructing_floats(
     p: &FillParams,
     line_height: f32,
+    lead: f32,
     line_max_width: f32,
     cumulative: &mut f32,
     pending: &mut f32,
-) {
+) -> f32 {
     if p.zones.is_empty() {
-        return;
+        return float_probe_top(p, *cumulative, 0.0);
     }
-    let absolute_y = p.paragraph_y_offset + *cumulative;
-    let skip = floats::find_clear_line_y(
+    let absolute_y = float_probe_top(p, *cumulative, lead);
+    let clear = floats::find_clear_line_y(
         absolute_y,
-        line_height,
+        line_height + lead,
         p.zones,
         line_max_width,
         floats::MIN_WRAP_SEGMENT_WIDTH,
-    ) - absolute_y;
-    if skip > 0.0 {
-        *cumulative += skip;
-        *pending += skip;
+    );
+    if clear <= absolute_y {
+        return float_probe_top(p, *cumulative, 0.0);
     }
+    *cumulative += clear - absolute_y;
+    *pending += clear - absolute_y;
+    clear + lead
 }
 
 /// Probe height for zone intersection tests: the default font size in px,
@@ -186,15 +226,21 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
     let mut cumulative_height = 0.0f32;
     let mut pending_float_skip = 0.0f32;
     let estimated = estimated_line_height(&p);
-    skip_obstructing_floats(
+    let first_top = skip_obstructing_floats(
         &p,
         estimated,
+        space_before(&p),
         p.first_line_width,
         &mut cumulative_height,
         &mut pending_float_skip,
     );
-    let first_margins =
-        floats::floating_margins(cumulative_height, estimated, p.zones, p.paragraph_y_offset);
+    let first_margins = floats::floating_margins(
+        first_top - p.paragraph_y_offset,
+        estimated,
+        p.zones,
+        p.paragraph_y_offset,
+        p.first_line_width,
+    );
     let first_available = floats::available_width(&first_margins, p.first_line_width).max(1.0);
 
     let mut filler = Filler {
@@ -212,7 +258,7 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
             max_below_baseline: 0.0,
             max_image_height_px: 0.0,
             available: first_available,
-            left_offset: first_margins.left,
+            left_offset: first_margins.text_left(),
             right_offset: first_margins.right,
             segment_zones: first_margins.segments,
             contributions: Vec::new(),
@@ -245,12 +291,22 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
 /// Measures an empty or whitespace-only paragraph as one zero-width line at
 /// the ruled height of `font` at `size_pt`, floored at
 /// [`WORD_SINGLE_LINE_FLOOR`] × the font size under every rule but `exact`.
+/// When `snap_pitch_px` is set and the rule is `auto`, the content box is
+/// first rounded up to a whole number of grid rows, so the rule's multiple
+/// scales the quantized pitch (a pinned `exact`/`atLeast` height never
+/// snaps).
+///
+/// `floats` carries the zone list and the paragraph's absolute Y. The line has
+/// no width to narrow, so only a `fullWidthBlock` band moves it, and it drops
+/// below any band its box reaches.
 pub(super) fn empty_paragraph_extent(
     store: &crate::font_store::FontStore,
     font: FontId,
     size_pt: f32,
     spacing: Option<&SpacingIn>,
     compat: &CompatIn,
+    snap_pitch_px: Option<f32>,
+    floats: (&[FloatZoneIn], f32),
 ) -> Result<ParagraphExtentOut, MeasureError> {
     let metrics = store
         .metrics(font)
@@ -258,13 +314,30 @@ pub(super) fn empty_paragraph_extent(
     let size_px = pt_to_px(size_pt);
     let content = wm::single_line_box(metrics, size_px, &to_flags(compat));
     let rule = rule_from_spacing(spacing);
+    // Pinned boxes (`exact` fixed, `atLeast` author-floored) never snap;
+    // only automatically-determined heights do.
+    let auto_rule = matches!(rule, wm::LineSpacingRule::Auto { .. });
+    let content = match snap_pitch_px.filter(|_| auto_rule) {
+        Some(pitch) => wm::snap_line_box(content, pitch),
+        None => content,
+    };
     let ruled = wm::apply_spacing_rule(content, &rule);
     let mut line_height = ruled.height();
     if floor_applies(&rule) {
         line_height = line_height.max(size_px * WORD_SINGLE_LINE_FLOOR);
     }
 
-    let mut total = line_height;
+    let (zones, paragraph_y_offset) = floats;
+    // Space-before is part of the box Word tests, and is spent again below.
+    let before = spacing
+        .and_then(|value| value.before)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let skip = floats::clear_full_width_band_y(paragraph_y_offset, before + line_height, zones)
+        - paragraph_y_offset;
+    let float_skip_before = (skip > 0.0).then_some(skip);
+
+    let mut total = line_height + float_skip_before.unwrap_or(0.0);
     if let Some(sp) = spacing {
         total += sp.before.unwrap_or(0.0) + sp.after.unwrap_or(0.0);
     }
@@ -282,7 +355,7 @@ pub(super) fn empty_paragraph_extent(
             left_offset: None,
             right_offset: None,
             segments: None,
-            float_skip_before: None,
+            float_skip_before,
             run_advances: None,
             cluster_advances: None,
             bidi_slices: None,
@@ -324,19 +397,13 @@ impl Filler<'_> {
         self.finalize_line()
     }
 
-    /// Place an inline image using its fitted height.
+    /// Place an inline image at its declared extent.
     fn fill_inline_image(&mut self, ri: u32, img: PreparedImage) -> Result<(), MeasureError> {
-        if self.cur.width + img.width > self.cur.available + WRAP_SLACK_PX {
+        if self.cur.width > 0.0 && self.cur.width + img.width > self.cur.available + WRAP_SLACK_PX {
             self.start_new_line(ri, 0)?;
         }
-        let fit_scale = if img.width > 0.0 && img.width > self.cur.available {
-            self.cur.available / img.width
-        } else {
-            1.0
-        };
-        let footprint = img.height * fit_scale;
-        if footprint > self.cur.max_image_height_px {
-            self.cur.max_image_height_px = footprint;
+        if img.height > self.cur.max_image_height_px {
+            self.cur.max_image_height_px = img.height;
         }
         self.record_atomic(ri, 0, 1, img.width, img.bidi_level);
         self.cur.width += img.width;
@@ -377,24 +444,75 @@ impl Filler<'_> {
     }
 
     /// Places a tab against the stop grid, recomputing its width after wrapping.
+    ///
+    /// A `start` stop that leaves the word after it no room takes the tab to
+    /// the next line with it — Word never strands that word at the paragraph
+    /// indent while its tab sits on the line above. Content too wide for a
+    /// whole line cannot be stranded, so the tab keeps its line for that.
     fn fill_tab_run(&mut self, run_index: usize, t: PreparedTab) -> Result<(), MeasureError> {
         let ri = run_index as u32;
         let following = self.following_width_after(run_index);
-        let mut tab_width = self.tab_width(following);
-        if self.cur.width + tab_width > self.cur.available + WRAP_SLACK_PX {
+        let mut tab = self.tab_width(following);
+        let word = if tab.reserves_following {
+            0.0
+        } else {
+            self.first_word_after(run_index)
+        };
+        let overflows = self.cur.width + tab.width > self.cur.available + WRAP_SLACK_PX;
+        let strands_word = self.cur.width > 0.0
+            && word > 0.0
+            && word <= self.cur.available + WRAP_SLACK_PX
+            && self.cur.width + tab.width + word > self.cur.available + WRAP_SLACK_PX;
+        if overflows || strands_word {
             self.start_new_line(ri, 0)?;
-            tab_width = self.tab_width(following);
+            tab = self.tab_width(following);
         }
 
         self.update_max_font(t.font_size_pt, t.metrics_font, 0.0);
-        self.record_atomic(ri, 0, 1, tab_width, t.bidi_level);
-        self.cur.width += tab_width;
+        self.record_atomic(ri, 0, 1, tab.width, t.bidi_level);
+        self.cur.width += tab.width;
         self.cur.tail_run = ri;
         self.cur.tail_char = 1;
         Ok(())
     }
 
-    fn tab_width(&self, following: f32) -> f32 {
+    /// Width of what the tab has to fit beside it on this line: the span up to
+    /// the first break opportunity, which can run past the end of one text run.
+    /// Unlike [`Self::following_width_after`], which sums declared width for an
+    /// `end` stop to anchor on, this counts only content that shares the line —
+    /// an own-line image never does, and a floating one carries no line width.
+    fn first_word_after(&self, tab_index: usize) -> f32 {
+        let mut width = 0.0f32;
+        for prun in &self.p.prepared[tab_index + 1..] {
+            match prun {
+                PreparedRun::Tab(_) | PreparedRun::LineBreak | PreparedRun::OwnLineImage(_) => {
+                    break;
+                }
+                PreparedRun::Text(t) => {
+                    if t.chars.is_empty() {
+                        continue;
+                    }
+                    let end = t.breaks.first().copied().unwrap_or(t.chars.len());
+                    width += visible_span_width(&t.chars[..end], t.letter_spacing);
+                    if !t.breaks.is_empty() {
+                        break;
+                    }
+                }
+                PreparedRun::Field(f) => {
+                    width += f.width;
+                    break;
+                }
+                PreparedRun::InlineImage(img) => {
+                    width += img.width;
+                    break;
+                }
+                PreparedRun::SkippedImage { .. } | PreparedRun::Hidden { .. } => {}
+            }
+        }
+        width
+    }
+
+    fn tab_width(&self, following: f32) -> tabs::TabAdvance {
         let line_x = self.cur.width + self.cur.left_offset;
         let is_first_line = self.lines.is_empty();
         let content_x = self.p.indent_left_px
@@ -597,6 +715,60 @@ impl Filler<'_> {
         }
     }
 
+    /// Whether the current line may snap: the paragraph carries an active
+    /// grid pitch, the spacing rule leaves the height automatic (`auto` —
+    /// a pinned `exact` box is fixed regardless of content and an `atLeast`
+    /// floor is author-set, so Word snaps neither), and no contributing
+    /// run opts out. Lines with no recorded contributions (e.g. only
+    /// hidden runs) defer to the paragraph.
+    fn line_may_snap(&self) -> bool {
+        if self.p.snap_pitch_px.is_none() {
+            return false;
+        }
+        if !matches!(self.rule, wm::LineSpacingRule::Auto { .. }) {
+            return false;
+        }
+        self.cur.contributions.iter().all(|part| {
+            self.p
+                .run_snaps
+                .get(part.run_index as usize)
+                .copied()
+                .unwrap_or(true)
+        })
+    }
+
+    /// Round the content box up to a whole number of grid rows, before the
+    /// spacing rule scales it.
+    fn snap_content_box(&self, content: wm::LineBox) -> wm::LineBox {
+        match (self.p.snap_pitch_px, self.line_may_snap()) {
+            (Some(pitch), true) => wm::snap_line_box(content, pitch),
+            _ => content,
+        }
+    }
+
+    /// Snap a final (possibly image-grown) line box. Ascent/descent stay
+    /// put; the caller grows only the box.
+    fn snap_line_height(&self, height: f32) -> f32 {
+        match (self.p.snap_pitch_px, self.line_may_snap()) {
+            (Some(pitch), true) => wm::snap_line_height(height, pitch),
+            _ => height,
+        }
+    }
+
+    /// Word sizes a line with no font-bearing run from the paragraph mark.
+    fn markless_box(&self, size_px: f32) -> wm::LineBox {
+        if let Some((font, size_pt)) = self.p.mark_font
+            && let Ok(metrics) = self.p.store.metrics(font)
+        {
+            return wm::single_line_box(metrics, pt_to_px(size_pt), &self.compat);
+        }
+        wm::LineBox {
+            ascent: size_px * 0.8,
+            descent: size_px * 0.2,
+            leading: size_px * (DEFAULT_SINGLE_LINE_RATIO - 1.0),
+        }
+    }
+
     /// Closes the current line: resolve typography from its largest font,
     /// apply the spacing rule, let any taller image grow the box, attach
     /// float offsets, segments and skip, and push the row. Advances the
@@ -637,13 +809,9 @@ impl Filler<'_> {
                 descent: self.cur.max_descent,
                 leading: self.cur.max_below_baseline - self.cur.max_descent,
             },
-            // Fontless lines use a 0.8/0.2 em split.
-            None => wm::LineBox {
-                ascent: size_px * 0.8,
-                descent: size_px * 0.2,
-                leading: size_px * (DEFAULT_SINGLE_LINE_RATIO - 1.0),
-            },
+            None => self.markless_box(size_px),
         };
+        let content = self.snap_content_box(content);
         let ruled = wm::apply_spacing_rule(content, &self.rule);
         let mut ascent = ruled.ascent;
         let mut descent = ruled.descent;
@@ -665,11 +833,24 @@ impl Filler<'_> {
             {
                 line_height = image_h + buffer * 2.0;
                 ascent = image_h + buffer;
+            } else if self.cur.max_font.is_none() {
+                // Word's box for an inline image alone on its line is exactly
+                // the image: the paragraph mark buys no descent under it.
+                descent = 0.0;
+                line_height = image_h;
+                ascent = image_h;
             } else {
                 line_height = image_h + buffer;
                 ascent = image_h;
             }
+            // The grid snaps the final box of an `auto`-ruled line,
+            // whatever grew it (`line_may_snap` still gates pinned rules
+            // out). Ascent/descent stay put so the extra lands below the
+            // descent.
+            line_height = self.snap_line_height(line_height);
         }
+
+        self.clear_full_width_bands(line_height);
 
         // Float fields are omitted when unset.
         let segments = match self.cur.segment_zones.as_deref() {
@@ -705,6 +886,47 @@ impl Filler<'_> {
         // Float probes advance by text height, excluding image growth.
         self.cumulative_height += text_line_height;
         Ok(())
+    }
+
+    /// Drops the closed line below any band its box reaches, taking the
+    /// margins it lands in. Narrower room declines: the fill would overflow.
+    fn clear_full_width_bands(&mut self, line_height: f32) {
+        if self.p.zones.is_empty() {
+            return;
+        }
+        let lead = if self.lines.is_empty() {
+            space_before(self.p)
+        } else {
+            0.0
+        };
+        let top = float_probe_top(self.p, self.cumulative_height, lead);
+        let clear = floats::clear_full_width_band_y(top, line_height + lead, self.p.zones);
+        if clear <= top {
+            return;
+        }
+        let skip = clear - top;
+        let full = if self.lines.is_empty() {
+            self.p.first_line_width
+        } else {
+            self.p.body_width
+        };
+        let margins = floats::floating_margins(
+            clear + lead - self.p.paragraph_y_offset,
+            line_height,
+            self.p.zones,
+            self.p.paragraph_y_offset,
+            full,
+        );
+        let available = floats::available_width(&margins, full).max(1.0);
+        if available + WRAP_SLACK_PX < self.cur.available {
+            return;
+        }
+        self.cumulative_height += skip;
+        self.pending_float_skip += skip;
+        self.cur.available = available;
+        self.cur.left_offset = margins.text_left();
+        self.cur.right_offset = margins.right;
+        self.cur.segment_zones = margins.segments;
     }
 
     /// Splits the just-closed line across the zone's strips. One strip — or a
@@ -780,18 +1002,20 @@ impl Filler<'_> {
     fn start_new_line(&mut self, run: u32, char_utf16: u32) -> Result<(), MeasureError> {
         self.finalize_line()?;
         let estimated = estimated_line_height(self.p);
-        skip_obstructing_floats(
+        let line_top = skip_obstructing_floats(
             self.p,
             estimated,
+            0.0,
             self.p.body_width,
             &mut self.cumulative_height,
             &mut self.pending_float_skip,
         );
         let margins = floats::floating_margins(
-            self.cumulative_height,
+            line_top - self.p.paragraph_y_offset,
             estimated,
             self.p.zones,
             self.p.paragraph_y_offset,
+            self.p.body_width,
         );
         let available = floats::available_width(&margins, self.p.body_width).max(1.0);
         self.cur = LineState {
@@ -808,7 +1032,7 @@ impl Filler<'_> {
             max_below_baseline: 0.0,
             max_image_height_px: 0.0,
             available,
-            left_offset: margins.left,
+            left_offset: margins.text_left(),
             right_offset: margins.right,
             segment_zones: margins.segments,
             contributions: Vec::new(),
@@ -1056,6 +1280,7 @@ mod tests {
 
     fn fill_at(width: f32, prepared: &[PreparedRun]) -> Vec<TypesetRowOut> {
         let compat = CompatIn::default();
+        let run_snaps = vec![true; prepared.len()];
         fill(FillParams {
             justify: false,
             store: &{
@@ -1068,6 +1293,7 @@ mod tests {
             body_width: width,
             first_line_width: width,
             default_font_size_pt: 12.0,
+            mark_font: None,
             compat: &compat,
             tabs: &[],
             indent_left_px: 0.0,
@@ -1075,6 +1301,8 @@ mod tests {
             zones: &[],
             paragraph_y_offset: 0.0,
             authoritative_shaping: false,
+            snap_pitch_px: None,
+            run_snaps: &run_snaps,
         })
         .unwrap()
         .lines

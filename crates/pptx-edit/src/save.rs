@@ -1,22 +1,22 @@
-//! Baseline-diff write-back: the live CRDT state is compared against a
-//! freshly seeded copy of the source package and only differences are written.
+//! Baseline-diff write-back: the live CRDT state is compared against the
+//! package's seeded baseline snapshot and only differences are written.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use base64::Engine as _;
 use ooxml_drawingml::{ColorValue, ShapeFill};
 use pptx_parse::{
     Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite, CommentsWrite,
-    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, Placeholder, PptxPackage,
-    RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform, ShapeWrite,
-    SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite,
+    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, Placeholder,
+    PptxPackage, RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform,
+    ShapeWrite, SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite,
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
-use crate::deck::{seed_doc, snapshot_doc};
+use crate::deck::baseline_snapshot;
 use crate::{
-    BOOTSTRAP_CLIENT_ID, CommentSnapshot, DeckSession, DeckSnapshot, EditError, EditResult,
-    ParagraphSnapshot, ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot,
-    doc_with_client_id,
+    CommentSnapshot, DeckSession, DeckSnapshot, EditError, EditResult, ParagraphSnapshot,
+    ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot,
 };
 
 /// Source shapes and inherited geometry.
@@ -92,12 +92,6 @@ impl DeckSession {
         pptx_parse::write_pptx_with_edits(&self.package, &deck)
             .map_err(|error| EditError::Write(error.to_string()))
     }
-}
-
-fn baseline_snapshot(package: &PptxPackage) -> EditResult<DeckSnapshot> {
-    let doc = doc_with_client_id(BOOTSTRAP_CLIENT_ID);
-    seed_doc(&doc, package, "")?;
-    snapshot_doc(&doc, package)
 }
 
 fn deck_write(
@@ -666,6 +660,7 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
             bold: run.style.bold,
             italic: run.style.italic,
             underline: run.style.underline.clone(),
+            caps: run.style.caps,
             font_family: run.style.font_family.clone(),
             color: run.style.color.as_deref().map(color_from_hex),
             language: None,
@@ -687,6 +682,9 @@ fn color_from_hex(color: &str) -> ColorValue {
 }
 
 fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
+    if shape.kind == ShapeKind::Picture {
+        return picture_shape_add(shape);
+    }
     if shape.kind != ShapeKind::Shape {
         return Err(EditError::Write(format!(
             "shape {} cannot be written as a new shape",
@@ -709,5 +707,34 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         fill: shape.fill.clone(),
         outline: shape.outline.clone(),
         paragraphs,
+        picture: None,
+    })
+}
+
+fn picture_shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
+    let pending = shape.pending_media.as_ref().ok_or_else(|| {
+        EditError::Write(format!(
+            "shape {} is a picture but carries no pending image data",
+            shape.id
+        ))
+    })?;
+    let media_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&pending.base64)
+        .map_err(|error| EditError::Write(format!("invalid pending image data: {error}")))?;
+    Ok(ShapeAdd {
+        name: shape.name.clone(),
+        geometry: "rect".to_owned(),
+        x: shape.x,
+        y: shape.y,
+        width: shape.width,
+        height: shape.height,
+        adjust_values: BTreeMap::new(),
+        fill: None,
+        outline: None,
+        paragraphs: None,
+        picture: Some(PictureAdd {
+            media_bytes,
+            content_type: pending.content_type.clone(),
+        }),
     })
 }

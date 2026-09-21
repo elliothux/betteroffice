@@ -2,11 +2,12 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
-    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, DefinedName, DrawCmd,
-    Error, FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES,
-    MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS,
-    NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet,
-    SheetChart, SheetId, StylePatch, UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
+    DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, Error, FreezePane, GridGeometry, Hyperlink,
+    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES,
+    MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest,
+    Sheet, SheetChart, SheetId, StylePatch, Stylesheet, UpdateOrigin, Viewport, Workbook,
+    WorkbookModel,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,6 +18,91 @@ use yrs::updates::encoder::Encode;
 
 fn cell(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
+}
+
+#[test]
+fn text_search_uses_formatted_values_and_stable_cell_order() {
+    let mut first = Sheet::new("Data");
+    first.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Text {
+                value: "Alpha alpha".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    first.set_cell(
+        cell("A2"),
+        Cell {
+            value: CellValue::Number { value: 0.25 },
+            ..Cell::default()
+        },
+    );
+    let mut second = Sheet::new("Later");
+    second.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Text {
+                value: "ALPHA".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    let model = WorkbookModel {
+        sheets: vec![first, second],
+        ..Default::default()
+    };
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook
+        .set_range_number_format(
+            SheetId(0),
+            CellRange::new(cell("A2"), cell("A2")),
+            NumberFormatMutation::Percent,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let matches = workbook.search_text("alpha", false, None);
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0].address.cell, cell("B1"));
+    assert_eq!(matches[1].address.sheet, SheetId(1));
+    assert_eq!(workbook.search_text("Alpha", true, None).len(), 1);
+    assert_eq!(workbook.search_text("alpha", false, Some(1)), &matches[..1]);
+    assert_eq!(workbook.search_text("25", false, None)[0].text, "25.00%");
+    assert!(workbook.search_text("", false, None).is_empty());
+}
+
+#[test]
+fn text_search_has_a_bounded_default_that_callers_can_override() {
+    let mut sheet = Sheet::new("Data");
+    for row in 0..=DEFAULT_TEXT_SEARCH_LIMIT as u32 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "match".into(),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert_eq!(
+        workbook.search_text("match", false, None).len(),
+        DEFAULT_TEXT_SEARCH_LIMIT
+    );
+    assert_eq!(
+        workbook
+            .search_text("match", false, Some(DEFAULT_TEXT_SEARCH_LIMIT + 1))
+            .len(),
+        DEFAULT_TEXT_SEARCH_LIMIT + 1
+    );
 }
 
 #[test]
@@ -80,13 +166,13 @@ fn indexed_palette_colors_reach_rendering_selection_sync_and_save() {
         assert!(
             list.commands
                 .iter()
-                .any(|cmd| matches!(cmd, DrawCmd::FillRect { color, .. } if color == "#5e88b1"))
+                .any(|cmd| matches!(cmd, DrawCmd::FillRect { color, .. } if &**color == "#5e88b1"))
         );
-        assert!(list.commands.iter().any(|cmd| matches!(cmd, DrawCmd::Text { text, color, .. } if text == "2" && color == "#99cc00")));
+        assert!(list.commands.iter().any(|cmd| matches!(cmd, DrawCmd::Text { text, color, .. } if &**text == "2" && &**color == "#99cc00")));
         assert!(
             list.commands
                 .iter()
-                .any(|cmd| matches!(cmd, DrawCmd::Line { color, .. } if color == "#123456"))
+                .any(|cmd| matches!(cmd, DrawCmd::Line { color, .. } if &**color == "#123456"))
         );
         assert_eq!(workbook.model().styles.cell_format(style), format);
     }
@@ -698,6 +784,85 @@ fn overlapping_merge_parts() -> Vec<(String, Vec<u8>)> {
     ]
 }
 
+fn table_package() -> Vec<u8> {
+    let workbook =
+        r#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let worksheet = r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Amount</t></is></c></row><row r="2"><c r="A2"><v>2</v></c></row><row r="3"><c r="A3"><v>3</v></c></row><row r="5"><c r="C5"><f>SUM(Sales[Amount])</f></c></row></sheetData></worksheet>"#;
+    let sheet_rels = r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="/xl/tables/table1.xml"/></Relationships>"#;
+    let table = r#"<table id="1" displayName="Sales" ref="A1:A3"><tableColumns count="1"><tableColumn id="1" name="Amount"/></tableColumns></table>"#;
+    ooxml_opc::rezip_parts(&[
+        ("xl/workbook.xml".to_string(), workbook.as_bytes().to_vec()),
+        (
+            "xl/_rels/workbook.xml.rels".to_string(),
+            rels.as_bytes().to_vec(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml".to_string(),
+            worksheet.as_bytes().to_vec(),
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels".to_string(),
+            sheet_rels.as_bytes().to_vec(),
+        ),
+        (
+            "xl/tables/table1.xml".to_string(),
+            table.as_bytes().to_vec(),
+        ),
+    ])
+    .unwrap()
+}
+
+/// The live model is the shared-state projection, so a table only reaches the
+/// evaluator if the projection carries it.
+#[test]
+fn structured_references_survive_the_shared_state_projection() {
+    let bytes = table_package();
+    for workbook in [
+        Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap(),
+        Workbook::open_collaborative_recalculated(&bytes, 7, CalculationOptions::default())
+            .unwrap(),
+    ] {
+        assert_eq!(
+            workbook.model().tables.len(),
+            1,
+            "the projection dropped the table"
+        );
+        assert_eq!(
+            workbook
+                .model()
+                .sheet(SheetId(0))
+                .unwrap()
+                .cell(cell("C5"))
+                .unwrap()
+                .value,
+            CellValue::Number { value: 5.0 }
+        );
+    }
+}
+
+/// A structural edit moves the table's rectangle, which no save rewrites yet,
+/// so the edit is refused rather than stranding the reference.
+#[test]
+fn a_row_insert_is_refused_while_a_formula_reads_a_table() {
+    let mut workbook = Workbook::open(&table_package()).unwrap();
+    let error = workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Operation(_)), "{error:?}");
+    assert_eq!(
+        workbook.model().sheets[0].cell(cell("A2")).unwrap().value,
+        CellValue::Number { value: 2.0 }
+    );
+}
+
 #[test]
 fn open_and_recalculation_are_explicit() {
     let cached = Workbook::open(&sample_xlsx()).unwrap();
@@ -1066,7 +1231,7 @@ fn frozen_panes_survive_the_facade_and_drive_the_initial_view() {
             ..Cell::default()
         },
     );
-    let geometry = GridGeometry::new(&sheet);
+    let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
     let expected_x = geometry.col_x(3) - geometry.col_x(1);
     let expected_y = geometry.row_y(4) - geometry.row_y(1);
     let mut model = WorkbookModel::default();
@@ -1147,7 +1312,7 @@ fn hyperlinks_survive_the_facade_and_reach_the_display_list() {
             color,
             underline: true,
             ..
-        } if text == "Website" && color == "#0563c1"
+        } if &**text == "Website" && &**color == "#0563c1"
     )));
     let (x, y) = workbook
         .cell_scroll_position(SheetId(0), cell("D4"))
@@ -1394,7 +1559,7 @@ fn edits_recalculate_render_and_round_trip() {
         display
             .commands
             .iter()
-            .any(|command| { matches!(command, DrawCmd::Text { text, .. } if text == "25") })
+            .any(|command| { matches!(command, DrawCmd::Text { text, .. } if &**text == "25") })
     );
 
     #[cfg(feature = "raster")]
@@ -1600,7 +1765,7 @@ fn pending_proposals_ghost_into_display_lists() {
                     color,
                     strike,
                     ..
-                } => Some((text.clone(), color.clone(), *strike)),
+                } => Some((text.to_string(), color.to_string(), *strike)),
                 _ => None,
             })
             .collect()
@@ -1610,17 +1775,17 @@ fn pending_proposals_ghost_into_display_lists() {
     assert!(
         ghosted
             .iter()
-            .any(|(text, color, strike)| text == "10" && color == "#c62828" && *strike)
+            .any(|(text, color, strike)| &**text == "10" && &**color == "#c62828" && *strike)
     );
     assert!(
         ghosted
             .iter()
-            .any(|(text, color, strike)| text == "30" && color == "#2e7d32" && !*strike)
+            .any(|(text, color, strike)| &**text == "30" && &**color == "#2e7d32" && !*strike)
     );
     assert!(
         !ghosted
             .iter()
-            .any(|(text, color, _)| text == "10" && color == "#000000")
+            .any(|(text, color, _)| &**text == "10" && &**color == "#000000")
     );
 
     workbook
@@ -1630,9 +1795,9 @@ fn pending_proposals_ghost_into_display_lists() {
     assert!(
         committed
             .iter()
-            .any(|(text, color, strike)| text == "30" && color == "#000000" && !*strike)
+            .any(|(text, color, strike)| &**text == "30" && &**color == "#000000" && !*strike)
     );
-    assert!(!committed.iter().any(|(_, color, _)| color == "#c62828"));
+    assert!(!committed.iter().any(|(_, color, _)| &**color == "#c62828"));
 }
 
 #[test]
@@ -1667,7 +1832,7 @@ fn proposal_previews_use_target_number_formats() {
     assert_eq!(proposal.edits[0].old_text, "10");
     assert_eq!(proposal.edits[0].new_text, "48.40%");
     assert_eq!(proposal.edits[1].old_text, "5");
-    assert_eq!(proposal.edits[1].new_text, "7/1/2026");
+    assert_eq!(proposal.edits[1].new_text, "7/1/26");
 
     workbook
         .accept_proposal(&proposal.id, false, CalculationOptions::default())
@@ -1728,8 +1893,8 @@ fn formula_proposals_keep_the_old_computed_display_value() {
                 color,
                 strike,
                 ..
-            } if color == "#c62828" || color == "#2e7d32" => {
-                Some((text.as_str(), color.as_str(), *strike))
+            } if &**color == "#c62828" || &**color == "#2e7d32" => {
+                Some((&**text, &**color, *strike))
             }
             _ => None,
         })
@@ -1777,8 +1942,8 @@ fn proposal_ghosts_include_recalculated_formula_dependents() {
                 color,
                 strike,
                 ..
-            } if color == "#c62828" || color == "#2e7d32" => {
-                Some((text.as_str(), color.as_str(), *strike))
+            } if &**color == "#c62828" || &**color == "#2e7d32" => {
+                Some((&**text, &**color, *strike))
             }
             _ => None,
         })
@@ -2144,7 +2309,16 @@ fn rename_invalidates_pending_proposals() {
 #[test]
 fn reports_recalculation_limits_without_overwriting_cached_values() {
     let mut model = WorkbookModel::default();
-    model.sheets.push(Sheet::new("Data"));
+    let mut data = Sheet::new("Data");
+    // a cell in the far corner gives Data the extent the limit is there for
+    data.set_cell(
+        cell("XFD1048576"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(data);
     let mut formulas = Sheet::new("Formulas");
     formulas.set_cell(
         cell("A1"),
@@ -6824,7 +6998,7 @@ fn chart_part(saved: &[u8]) -> Vec<u8> {
 /// comparison pass with the projection switched off entirely.
 fn chart_only_viewport(workbook: &Workbook) -> Viewport {
     let sheet = workbook.model().sheet(SheetId(0)).unwrap();
-    let geometry = GridGeometry::new(sheet);
+    let geometry = GridGeometry::new(sheet, &workbook.model().styles);
     Viewport {
         x: geometry.col_x(3),
         y: 0.0,
@@ -6889,4 +7063,118 @@ fn an_imported_chart_keeps_a_cache_it_cannot_resolve_safely() {
         bump_b2(&mut workbook);
         assert_eq!(before, plotted(&workbook), "{reason} must keep its cache");
     }
+}
+
+#[test]
+fn inserting_a_column_carries_the_column_style_with_it() {
+    let mut sheet = Sheet::new("Tinted");
+    sheet.col_styles = vec![ColStyle {
+        first: 2,
+        last: 4,
+        xf: 0,
+    }];
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    assert_eq!(workbook.model().sheets[0].col_style(2), Some(0));
+
+    workbook
+        .apply_ops(
+            vec![Op::InsertCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 2,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        workbook.model().sheets[0].col_styles,
+        vec![ColStyle {
+            first: 4,
+            last: 6,
+            xf: 0
+        }],
+        "the run moves with the columns it formats"
+    );
+    assert_eq!(workbook.model().sheets[0].col_style(2), None);
+    assert_eq!(workbook.model().sheets[0].col_style(4), Some(0));
+
+    workbook
+        .apply_ops(
+            vec![Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 2,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.model().sheets[0].col_style(2), Some(0));
+}
+
+/// a worksheet whose only formula is a dynamic array anchored at C1.
+fn spill_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Sheet1"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>3</v></c><c r="C1"><f t="array" ref="C1:C3">_xlfn._xlws.SORT(A1:A3)</f></c></row><row r="2"><c r="A2"><v>1</v></c><c r="C2"/></row><row r="3"><c r="A3"><v>2</v></c><c r="C3"/></row></sheetData></worksheet>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// spilled values are computed, never authored: opening and saving without a
+/// recalculation still reproduces the source bytes.
+#[test]
+fn an_unrecalculated_array_formula_round_trips_byte_identically() {
+    let original = spill_fixture();
+    let before = ooxml_opc::unzip_parts(&original).unwrap();
+    let saved = Workbook::open(&original).unwrap().save().unwrap();
+    assert_eq!(ooxml_opc::unzip_parts(&saved).unwrap(), before);
+}
+
+/// recalculating writes the whole rectangle, and the save projection carries
+/// exactly what the model holds.
+#[test]
+fn recalculation_spills_an_array_formula_into_the_saved_sheet() {
+    let workbook =
+        Workbook::open_recalculated(&spill_fixture(), CalculationOptions::default()).unwrap();
+    let sheet = workbook.model().sheet(SheetId(0)).unwrap();
+    let value = |address: &str| {
+        sheet
+            .cell(CellRef::parse_a1(address).unwrap())
+            .map(|cell| cell.value.clone())
+    };
+    assert_eq!(value("C1"), Some(CellValue::Number { value: 1.0 }));
+    assert_eq!(value("C2"), Some(CellValue::Number { value: 2.0 }));
+    assert_eq!(value("C3"), Some(CellValue::Number { value: 3.0 }));
+
+    let saved = workbook.save().unwrap();
+    let reopened = Workbook::open(&saved).unwrap();
+    let projected = reopened.model().sheet(SheetId(0)).unwrap();
+    for (address, expected) in [("C1", 1.0), ("C2", 2.0), ("C3", 3.0)] {
+        assert_eq!(
+            projected
+                .cell(CellRef::parse_a1(address).unwrap())
+                .map(|cell| cell.value.clone()),
+            Some(CellValue::Number { value: expected }),
+            "{address} survives the save projection"
+        );
+    }
+    assert_eq!(
+        projected.array_formula(CellRef::parse_a1("C1").unwrap()),
+        Some(xlsx_model::CellRange::parse_a1("C1:C3").unwrap())
+    );
 }

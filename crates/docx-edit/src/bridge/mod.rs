@@ -82,6 +82,12 @@ pub struct RenderEnv {
     pub show_hidden_text: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph_spacing_line_px: Option<f64>,
+    /// Section document-grid snap pitch in px (`w:docGrid w:linePitch`),
+    /// gated to an activating grid type. Lowering stamps it onto every
+    /// paragraph; the engine's per-section resolve pass corrects later
+    /// sections. `None` disables snapping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
 }
@@ -217,7 +223,8 @@ fn lower_story<T: ReadTxn>(
         let mut paragraph_pm_units = 0_u32;
         let mut pm_cursor = pm_base;
         let mut at_block_boundary = true;
-        let mut hidden_field_paragraphs = BTreeSet::new();
+        let mut hidden_field_blocks = BTreeSet::new();
+        let mut pending_hidden_field_blocks = BTreeSet::new();
         // Sections are body-level, so the cascade is per story; cell and
         // header/footer stories simply never carry section properties.
         let mut section_margins = SectionMarginsTwips::default();
@@ -265,10 +272,13 @@ fn lower_story<T: ReadTxn>(
                     );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
                     if !shared_map_string(&pilcrow, txn, "paraId")
-                        .is_some_and(|id| hidden_field_paragraphs.contains(&id))
+                        .is_some_and(|id| hidden_field_blocks.contains(&id))
                     {
                         blocks.extend(paragraph_blocks);
                     }
+                    // The field's own paragraph is the one just closed, so the
+                    // range it suppresses opens with the next block.
+                    hidden_field_blocks.append(&mut pending_hidden_field_blocks);
                     // A pilcrow carrying section properties ENDS its section,
                     // so the break block follows its paragraph.
                     if let Some(section_break) = section_break_block(&values, &mut section_margins)
@@ -296,7 +306,9 @@ fn lower_story<T: ReadTxn>(
                             detail: "table embed interrupts paragraph content".to_owned(),
                         });
                     }
-                    let (table, node_size) = lower_table(
+                    let hidden = shared_map_string(&table, txn, "blockId")
+                        .is_some_and(|id| hidden_field_blocks.contains(&id));
+                    let (lowered, node_size) = lower_table(
                         &table,
                         txn,
                         story_id,
@@ -306,7 +318,9 @@ fn lower_story<T: ReadTxn>(
                         active_stories,
                         list_state,
                     )?;
-                    blocks.push(LayoutBlock::Table(table));
+                    if !hidden {
+                        blocks.push(LayoutBlock::Table(lowered));
+                    }
                     story_index += 1;
                     paragraph_start = story_index;
                     pm_cursor += node_size;
@@ -396,7 +410,9 @@ fn lower_story<T: ReadTxn>(
                         },
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
-                    blocks.extend(child_blocks);
+                    if !hidden_field_blocks.contains(&child_story) {
+                        blocks.extend(child_blocks);
+                    }
                     story_index += 1;
                     paragraph_start = story_index;
                     pm_cursor += content_size + 2;
@@ -460,11 +476,9 @@ fn lower_story<T: ReadTxn>(
                     let hidden = instruction
                         .as_deref()
                         .is_some_and(super::seed::numeric_field_instruction);
-                    if hidden
-                        && let Some(data) = shared_map_string(&field, txn, "fieldData")
-                            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
-                    {
-                        collect_hidden_field_paragraphs(&data, &mut hidden_field_paragraphs);
+                    if hidden {
+                        pending_hidden_field_blocks
+                            .append(&mut hidden_field_result_blocks(&field, txn));
                     }
                     let field_type = shared_map_string(&field, txn, "fieldType")
                         .unwrap_or_else(|| "OTHER".to_owned());
@@ -635,11 +649,68 @@ fn lower_story<T: ReadTxn>(
                             index: story_index,
                         });
                     };
-                    paragraph_drawings.push(DrawingMarker {
-                        pm_offset,
-                        block: LayoutBlock::Shape(block),
-                        hidden: mark_bool(attributes, "hidden") == Some(true),
-                    });
+                    let formatting = lower_run_formatting(attributes, env);
+                    if shapes::inline_native_shape(&block) {
+                        let image = ImageRun {
+                            src: String::new(),
+                            width: block.width,
+                            height: block.height,
+                            alt: block.description.clone().or_else(|| block.title.clone()),
+                            shape_type: Some(block.shape_type.clone()),
+                            transform: None,
+                            position: None,
+                            wrap_type: Some("inline".to_owned()),
+                            display_mode: Some("inline".to_owned()),
+                            css_float: Some("none".to_owned()),
+                            dist_top: None,
+                            dist_bottom: None,
+                            dist_left: None,
+                            dist_right: None,
+                            crop_top: None,
+                            crop_right: None,
+                            crop_bottom: None,
+                            crop_left: None,
+                            opacity: None,
+                            rotation_deg: None,
+                            flip_h: None,
+                            flip_v: None,
+                            rotation_bounds: None,
+                            wrap_text: None,
+                            wrap_polygon: None,
+                            allow_overlap: None,
+                            layout_in_cell: None,
+                            effect_extent: None,
+                            effects: None,
+                            outline: None,
+                            decorative: block.decorative,
+                            hyperlink: formatting.hyperlink.clone(),
+                            inline_shape: Some(Box::new(block)),
+                            is_insertion: formatting.is_insertion,
+                            is_deletion: formatting.is_deletion,
+                            change_author: formatting.change_author.clone(),
+                            change_date: formatting.change_date.clone(),
+                            change_revision_id: formatting.change_revision_id,
+                            pm_start: None,
+                            pm_end: None,
+                        };
+                        paragraph_runs.push(RawRun {
+                            kind: RawRunKind::Image(image),
+                            formatting,
+                            story_start: story_index,
+                            story_end: story_index + 1,
+                            pm_start: pm_offset,
+                            pm_end: pm_offset + 1,
+                            inherited_hyperlink: inherited_hyperlink_style(attributes),
+                            inline_sdt_widget: None,
+                        });
+                    } else {
+                        paragraph_drawings.push(DrawingMarker {
+                            pm_offset,
+                            anchored: shapes::anchored_shape(&block),
+                            block: LayoutBlock::Shape(block),
+                            hidden: mark_bool(attributes, "hidden") == Some(true),
+                        });
+                    }
                     story_index += 1;
                     paragraph_pm_units += 1;
                     at_block_boundary = false;
@@ -663,6 +734,7 @@ fn lower_story<T: ReadTxn>(
                         pm_offset,
                         block: LayoutBlock::Chart(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
+                        anchored: false,
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -702,21 +774,12 @@ pub fn yrsDocToLayoutBlocks(
     yrs_doc_to_layout_blocks(doc, story_id, env)
 }
 
-fn collect_hidden_field_paragraphs(data: &serde_json::Value, hidden: &mut BTreeSet<String>) {
-    let Some(blocks) = data["structuredResult"]["blocks"].as_array() else {
-        return;
+/// Story blocks a hidden field's cached result duplicates, bound at seed time.
+fn hidden_field_result_blocks<T: ReadTxn>(field: &MapRef, txn: &T) -> BTreeSet<String> {
+    let Some(Any::Array(ids)) = shared_any(field, txn, "fieldResultBlocks") else {
+        return BTreeSet::new();
     };
-    if !blocks.last().is_some_and(|block| {
-        block["type"].as_str() == Some("paragraph")
-            && block["content"].as_array().is_some_and(Vec::is_empty)
-    }) {
-        return;
-    }
-    for block in blocks {
-        if let Some(id) = block["paraId"].as_str() {
-            hidden.insert(id.to_owned());
-        }
-    }
+    ids.iter().filter_map(any_str).map(str::to_owned).collect()
 }
 
 fn malformed_table(story: &str, index: u32, detail: impl Into<String>) -> BridgeError {
@@ -972,6 +1035,13 @@ fn lower_table<T: ReadTxn>(
         .get("floating")
         .and_then(any_map)
         .map(lower_floating_table);
+    let compatibility_mode = map_number(tbl_pr, "compatibilityMode").and_then(|value| {
+        (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
+    });
+    let cell_margin_left = table_margins
+        .and_then(|margins| map_number(margins, "left"))
+        .map(twips_to_pixels)
+        .filter(|value| value.is_finite() && *value > 0.0);
 
     Ok((
         TableBlock {
@@ -991,6 +1061,8 @@ fn lower_table<T: ReadTxn>(
             bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
             indent,
             floating,
+            compatibility_mode,
+            cell_margin_left,
             pm_start: Some(pm_start as f64),
             pm_end: Some((pm_start + node_size) as f64),
         },
@@ -1151,6 +1223,7 @@ fn lower_image_values(
         outline: None,
         decorative: None,
         hyperlink: None,
+        inline_shape: None,
         is_insertion: formatting.is_insertion,
         is_deletion: formatting.is_deletion,
         change_author: formatting.change_author.clone(),
@@ -1840,13 +1913,13 @@ struct RawRun {
     inline_sdt_widget: Option<Value>,
 }
 
-/// A shape or chart child that splits its paragraph, held with the position it
-/// occupied so the surrounding runs keep their original offsets.
+/// A paragraph's shape or chart child, at the offset it occupied.
 #[derive(Clone, Debug)]
 struct DrawingMarker {
     pm_offset: u32,
     block: LayoutBlock,
     hidden: bool,
+    anchored: bool,
 }
 
 /// Resolves every comment anchored in `story_id` to sorted, story-global
@@ -1971,10 +2044,9 @@ fn push_text_chunks(
     }
 }
 
-/// Emits the blocks one paragraph contributes: normally a single paragraph
-/// block, but a paragraph holding shape or chart children breaks into the text
-/// segments around them, each carrying the same pilcrow properties. Empty
-/// segments are dropped, and every surviving run keeps its original position.
+/// Emits the blocks one paragraph contributes. Anchored children are lifted
+/// out ahead of it and leave it whole; in-flow ones break it into the text
+/// segments around them, each carrying the same pilcrow properties.
 #[allow(clippy::too_many_arguments)]
 fn flush_paragraph_parts<T: ReadTxn>(
     mut raw_runs: Vec<RawRun>,
@@ -1998,6 +2070,10 @@ fn flush_paragraph_parts<T: ReadTxn>(
         raw_runs.retain(|run| run.formatting.hidden != Some(true));
         drawings.retain(|drawing| !drawing.hidden);
     }
+    let (anchored, drawings): (Vec<_>, Vec<_>) =
+        drawings.into_iter().partition(|drawing| drawing.anchored);
+    let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();
+
     if drawings.is_empty() {
         let paragraph = flush_paragraph(
             raw_runs,
@@ -2019,12 +2095,12 @@ fn flush_paragraph_parts<T: ReadTxn>(
                     .and_then(|defaults| map_bool(defaults, "hidden"))
             }) == Some(true)
         {
-            return Vec::new();
+            return blocks;
         }
-        return vec![LayoutBlock::Paragraph(paragraph)];
+        blocks.push(LayoutBlock::Paragraph(paragraph));
+        return blocks;
     }
 
-    let mut blocks = Vec::new();
     let mut segment_start = 0_u32;
     for drawing in drawings {
         let split_at = raw_runs.partition_point(|run| run.pm_end <= drawing.pm_offset);
@@ -2306,9 +2382,34 @@ fn coalesce_runs(runs: Vec<RawRun>) -> Vec<RawRun> {
     result
 }
 
+/// Compares formatting while preserving serialized non-finite equality.
 fn formatting_equal(left: &RunFormatting, right: &RunFormatting) -> bool {
-    serde_json::to_value(left).expect("RunFormatting serializes")
-        == serde_json::to_value(right).expect("RunFormatting serializes")
+    left == right
+        || (has_nonfinite(left)
+            && has_nonfinite(right)
+            && serde_json::to_value(left).expect("RunFormatting serializes")
+                == serde_json::to_value(right).expect("RunFormatting serializes"))
+}
+
+fn has_nonfinite(formatting: &RunFormatting) -> bool {
+    formatting
+        .comment_ids
+        .as_ref()
+        .is_some_and(|ids| ids.iter().any(|id| !id.is_finite()))
+        || [
+            formatting.font_size,
+            formatting.font_size_cs,
+            formatting.letter_spacing,
+            formatting.position_px,
+            formatting.horizontal_scale,
+            formatting.kerning_min_pt,
+            formatting.footnote_ref_id,
+            formatting.endnote_ref_id,
+            formatting.change_revision_id,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_finite())
 }
 
 fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
@@ -2628,6 +2729,11 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
     result.text_outline = mark_bool(attributes, "textOutline");
     result.hidden = mark_bool(attributes, "hidden");
     result.rtl = mark_bool(attributes, "rtl");
+    // Document-grid opt-out (w:snapToGrid, default on): only an authored
+    // off is carried, mirroring widowControl.
+    if attribute(attributes, "snapToGrid").and_then(any_bool) == Some(false) {
+        result.snap_to_grid = Some(false);
+    }
 
     if let Some(value) = attribute(attributes, "complexScript") {
         match value {
@@ -2866,6 +2972,12 @@ fn lower_paragraph_attrs(
             .filter(|style| !style.is_empty());
     }
     lower_paragraph_spacing(values, &mut result, env.paragraph_spacing_line_px);
+    // Section document-grid pitch for line-height snapping, stamped at
+    // lowering so incremental reuse compares resolved blocks. The engine
+    // overwrites this per section after lowering.
+    result.doc_grid_pitch_px = env
+        .doc_grid_pitch_px
+        .filter(|pitch| pitch.is_finite() && *pitch > 0.0);
     lower_paragraph_indent(values, &mut result);
     lower_paragraph_tabs(values, &mut result);
 
@@ -2873,8 +2985,25 @@ fn lower_paragraph_attrs(
     result.keep_lines = true_property(values, "keepLines");
     result.widow_control = false_property(values, "widowControl");
     result.page_break_before = true_property(values, "pageBreakBefore");
+    result.page_break_before_run = true_property(values, "pageBreakBeforeRun");
     result.contextual_spacing = true_property(values, "contextualSpacing");
     result.bidi = true_property(values, "bidi");
+    // Document-grid opt-out (w:snapToGrid, default on): the direct pPr child
+    // AND the paragraph-mark rPr (in defaultTextFormatting) both opt out.
+    result.snap_to_grid = false_property(values, "snapToGrid");
+    if values
+        .get("defaultTextFormatting")
+        .and_then(any_map)
+        .and_then(|defaults| defaults.get("snapToGrid"))
+        .and_then(any_bool)
+        == Some(false)
+    {
+        result.snap_to_grid = Some(false);
+    }
+    // East Asian auto-spacing opt-outs (w:autoSpaceDE / w:autoSpaceDN, both
+    // default on).
+    result.auto_space_de = false_property(values, "autoSpaceDE");
+    result.auto_space_dn = false_property(values, "autoSpaceDN");
     result.borders = lower_paragraph_borders(values, env);
     result.shading = values
         .get("shading")
@@ -2891,14 +3020,25 @@ fn lower_paragraph_attrs(
     result.list_marker_hidden = true_property(values, "listMarkerHidden");
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
     result.list_marker_font_size = value_number(values.get("listMarkerFontSize"));
-    if result.list_marker.is_some()
-        && let Some(Any::Map(formatting)) = values.get("defaultTextFormatting")
-    {
-        result.list_marker_bold = map_bool(formatting, "bold");
-        result.list_marker_italic = map_bool(formatting, "italic");
-        result.list_marker_color = formatting
-            .get("color")
+    if result.list_marker.is_some() {
+        let explicit_bold = values.get("listMarkerBold").and_then(any_bool);
+        let explicit_italic = values.get("listMarkerItalic").and_then(any_bool);
+        let explicit_color = values
+            .get("listMarkerColor")
             .and_then(|color| resolve_color(color, env));
+        if let Some(Any::Map(formatting)) = values.get("defaultTextFormatting") {
+            result.list_marker_bold = explicit_bold.or_else(|| map_bool(formatting, "bold"));
+            result.list_marker_italic = explicit_italic.or_else(|| map_bool(formatting, "italic"));
+            result.list_marker_color = explicit_color.or_else(|| {
+                formatting
+                    .get("color")
+                    .and_then(|color| resolve_color(color, env))
+            });
+        } else {
+            result.list_marker_bold = explicit_bold;
+            result.list_marker_italic = explicit_italic;
+            result.list_marker_color = explicit_color;
+        }
     }
     result.list_marker_suffix = value_string(values.get("listMarkerSuffix"));
     result.default_tab_stop_twips = env.default_tab_stop_twips;
@@ -3257,6 +3397,9 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
     result.bold_cs = map_bool(defaults, "boldCs");
     result.italic_cs = map_bool(defaults, "italicCs");
     result.complex_script = map_bool(defaults, "cs");
+    if defaults.get("snapToGrid").and_then(any_bool) == Some(false) {
+        result.snap_to_grid = Some(false);
+    }
     if let Some(Any::Map(language)) = defaults.get("language") {
         result.language = Some(RunLanguageSlots {
             latin: map_string(language, "latin").or_else(|| map_string(language, "val")),
@@ -3288,6 +3431,9 @@ fn apply_run_defaults(target: &mut RunFormatting, defaults: &RunFormatting) {
     }
     if target.complex_script.is_none() {
         target.complex_script = defaults.complex_script;
+    }
+    if target.snap_to_grid.is_none() {
+        target.snap_to_grid = defaults.snap_to_grid;
     }
     if target.language.is_none() {
         target.language = defaults.language.clone();
@@ -3790,6 +3936,66 @@ mod tests {
     }
 
     #[test]
+    fn list_marker_level_off_overrides_paragraph_on() {
+        let values = BTreeMap::from([
+            ("listMarker".to_owned(), Any::String("1.".into())),
+            ("listMarkerBold".to_owned(), Any::Bool(false)),
+            ("listMarkerItalic".to_owned(), Any::Bool(false)),
+            (
+                "listMarkerColor".to_owned(),
+                any_map([("rgb", Any::String("000000".into()))]),
+            ),
+            (
+                "defaultTextFormatting".to_owned(),
+                any_map([
+                    ("bold", Any::Bool(true)),
+                    ("italic", Any::Bool(true)),
+                    ("color", any_map([("rgb", Any::String("FF0000".into()))])),
+                ]),
+            ),
+        ]);
+        let attrs = lower_paragraph_attrs(
+            &values,
+            None,
+            &RenderEnv::default(),
+            &mut ListState::default(),
+        );
+        assert_eq!(attrs.list_marker_bold, Some(false));
+        assert_eq!(attrs.list_marker_italic, Some(false));
+        assert_eq!(attrs.list_marker_color.as_deref(), Some("#000000"));
+    }
+
+    #[test]
+    fn list_marker_level_on_overrides_body_off() {
+        let values = BTreeMap::from([
+            ("listMarker".to_owned(), Any::String("1.".into())),
+            ("listMarkerBold".to_owned(), Any::Bool(true)),
+            ("listMarkerItalic".to_owned(), Any::Bool(true)),
+            (
+                "listMarkerColor".to_owned(),
+                any_map([("rgb", Any::String("FF0000".into()))]),
+            ),
+            (
+                "defaultTextFormatting".to_owned(),
+                any_map([
+                    ("bold", Any::Bool(false)),
+                    ("italic", Any::Bool(false)),
+                    ("color", any_map([("rgb", Any::String("000000".into()))])),
+                ]),
+            ),
+        ]);
+        let attrs = lower_paragraph_attrs(
+            &values,
+            None,
+            &RenderEnv::default(),
+            &mut ListState::default(),
+        );
+        assert_eq!(attrs.list_marker_bold, Some(true));
+        assert_eq!(attrs.list_marker_italic, Some(true));
+        assert_eq!(attrs.list_marker_color.as_deref(), Some("#FF0000"));
+    }
+
+    #[test]
     fn table_cell_edges_preserve_fractional_borders_and_explicit_zero_padding() {
         let border = std::collections::HashMap::from([
             ("style".to_owned(), Any::String("single".into())),
@@ -4239,6 +4445,272 @@ mod tests {
             assert_eq!(blocks[1]["attrs"]["listMarker"], "■");
             assert_ne!(blocks[1]["attrs"]["listMarkerHidden"], true);
         }
+    }
+
+    #[test]
+    fn inline_textless_shape_stays_one_paragraph_with_native_payload() {
+        let doc = EditingDoc::new(60);
+        doc.create_story("body", "AB", "Normal", "left").unwrap();
+        let shape = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "geometryPath": [
+                {"type": "move", "x": 0.1, "y": 0.2},
+                {"type": "line", "x": 0.9, "y": 0.8},
+                {"type": "close"}
+            ],
+            "fill": {"type": "solid", "color": {"rgb": "112233"}},
+            "outline": {"color": {"rgb": "445566"}, "width": 19050},
+            "transform": {"rotation": 12, "flipH": true},
+            "children": [
+                {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}
+            ]
+        });
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 1,
+                kind: "shape".to_owned(),
+                payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                attrs: Attrs::new(),
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!("expected single paragraph");
+        };
+        assert_eq!(paragraph.runs.len(), 3);
+        let Run::Text(before) = &paragraph.runs[0] else {
+            panic!("expected leading text");
+        };
+        assert_eq!(before.text, "A");
+        let Run::Image(image) = &paragraph.runs[1] else {
+            panic!("expected inline shape image");
+        };
+        assert_eq!(image.wrap_type.as_deref(), Some("inline"));
+        assert_eq!(image.display_mode.as_deref(), Some("inline"));
+        let inline = image.inline_shape.as_ref().expect("native payload");
+        assert_eq!(inline.geometry_path.len(), 3);
+        assert_eq!(inline.geometry_path[0]["x"], 0.1);
+        assert_eq!(inline.fill.as_ref().unwrap()["color"], "#112233");
+        assert_eq!(inline.stroke.as_ref().unwrap()["color"], "#445566");
+        assert_eq!(inline.transform.as_ref().unwrap()["flipH"], true);
+        assert_eq!(inline.children.len(), 1);
+        assert_eq!((image.width, image.height), (96.0, 48.0));
+        assert_eq!((image.pm_start, image.pm_end), (Some(2.0), Some(3.0)));
+        let Run::Text(after) = &paragraph.runs[2] else {
+            panic!("expected trailing text");
+        };
+        assert_eq!(after.text, "B");
+        assert_eq!((after.pm_start, after.pm_end), (Some(3.0), Some(4.0)));
+    }
+
+    fn shape_embed_blocks(seed: u64, shape: Value) -> Vec<LayoutBlock> {
+        let doc = EditingDoc::new(seed);
+        doc.create_story("body", "AB", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 1,
+                kind: "shape".to_owned(),
+                payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                attrs: Attrs::new(),
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap()
+    }
+
+    #[test]
+    fn in_flow_text_shape_splits_paragraph() {
+        let blocks = shape_embed_blocks(
+            61,
+            json!({
+                "shapeType": "rect",
+                "size": {"width": 914400, "height": 457200},
+                "textBody": {"content": [{
+                    "paraId": "p1",
+                    "content": [{
+                        "type": "run",
+                        "content": [{"type": "text", "text": "hi"}]
+                    }]
+                }]}
+            }),
+        );
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(blocks[0], LayoutBlock::Paragraph(_)));
+        assert!(matches!(blocks[1], LayoutBlock::Shape(_)));
+        assert!(matches!(blocks[2], LayoutBlock::Paragraph(_)));
+    }
+
+    #[test]
+    fn anchored_shape_leaves_its_paragraph_whole() {
+        let blocks = shape_embed_blocks(
+            64,
+            json!({
+                "shapeType": "rect",
+                "size": {"width": 914400, "height": 457200},
+                "position": {
+                    "horizontal": {"relativeTo": "column", "posOffset": 0},
+                    "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+                },
+                "wrap": {"type": "square"}
+            }),
+        );
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], LayoutBlock::Shape(_)));
+        let LayoutBlock::Paragraph(paragraph) = &blocks[1] else {
+            panic!("expected one whole paragraph");
+        };
+        assert_eq!(paragraph.runs.len(), 2);
+        assert_eq!(paragraph.pm_start, Some(0.0));
+        assert_eq!(paragraph.pm_end, Some(5.0));
+    }
+
+    #[test]
+    fn anchor_that_lost_its_position_still_leaves_its_paragraph_whole() {
+        let blocks = shape_embed_blocks(
+            66,
+            json!({
+                "shapeType": "rect",
+                "size": {"width": 914400, "height": 457200},
+                "wrap": {"type": "square"}
+            }),
+        );
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], LayoutBlock::Shape(_)));
+        let LayoutBlock::Paragraph(paragraph) = &blocks[1] else {
+            panic!("expected one whole paragraph");
+        };
+        assert_eq!(paragraph.runs.len(), 2);
+    }
+
+    #[test]
+    fn paragraph_anchoring_only_shapes_still_charges_a_line() {
+        let doc = EditingDoc::new(65);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 0,
+                kind: "shape".to_owned(),
+                payload: vec![(
+                    "shapeJson".to_owned(),
+                    Any::from(
+                        json!({
+                            "shapeType": "rect",
+                            "size": {"width": 914400, "height": 457200},
+                            "position": {
+                                "horizontal": {"relativeTo": "column", "posOffset": 0},
+                                "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+                            },
+                            "wrap": {"type": "none"}
+                        })
+                        .to_string(),
+                    ),
+                )],
+                attrs: Attrs::new(),
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], LayoutBlock::Shape(_)));
+        assert!(matches!(blocks[1], LayoutBlock::Paragraph(_)));
+    }
+
+    #[test]
+    fn inline_shape_preserves_pm_revision_and_hidden() {
+        let shape = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200}
+        });
+        let doc = EditingDoc::new(62);
+        doc.create_story("body", "AB", "Normal", "left").unwrap();
+        let mut revision_attrs = Attrs::new();
+        revision_attrs.insert(
+            Arc::from("ins"),
+            any_map([
+                ("id", Any::Number(7.0)),
+                ("author", Any::from("Ada")),
+                ("date", Any::from(DATE)),
+            ]),
+        );
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 1,
+                kind: "shape".to_owned(),
+                payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                attrs: revision_attrs,
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!();
+        };
+        let Run::Image(image) = &paragraph.runs[1] else {
+            panic!();
+        };
+        assert_eq!(image.is_insertion, Some(true));
+        assert_eq!(image.change_author.as_deref(), Some("Ada"));
+        assert!(image.inline_shape.is_some());
+        let hidden_doc = EditingDoc::new(63);
+        hidden_doc
+            .create_story("body", "AB", "Normal", "left")
+            .unwrap();
+        let mut hidden_attrs = Attrs::new();
+        hidden_attrs.insert(Arc::from("hidden"), Any::Bool(true));
+        hidden_doc
+            .apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "shape".to_owned(),
+                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                    attrs: hidden_attrs,
+                }],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&hidden_doc, "body", &RenderEnv::default()).unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!();
+        };
+        assert!(
+            !paragraph
+                .runs
+                .iter()
+                .any(|run| matches!(run, Run::Image(_))),
+            "hidden inline shape filtered"
+        );
+        let shown = yrs_doc_to_layout_blocks(
+            &hidden_doc,
+            "body",
+            &RenderEnv {
+                show_hidden_text: true,
+                ..RenderEnv::default()
+            },
+        )
+        .unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &shown[0] else {
+            panic!();
+        };
+        assert!(
+            paragraph
+                .runs
+                .iter()
+                .any(|run| matches!(run, Run::Image(_))),
+            "show_hidden_text keeps inline shape"
+        );
     }
 
     #[test]
@@ -4862,5 +5334,65 @@ mod tests {
         doc.set_paragraph_attr(&para, "widowControl", Any::Bool(false))
             .unwrap();
         assert_eq!(attrs(&doc)["widowControl"], json!(false));
+    }
+
+    #[test]
+    fn formatting_equal_matches_serialized_equality_on_nonfinite_values() {
+        let finite = RunFormatting {
+            font_size: Some(12.0),
+            ..RunFormatting::default()
+        };
+        let nan_size = RunFormatting {
+            font_size: Some(f64::NAN),
+            ..RunFormatting::default()
+        };
+        let nan_size2 = RunFormatting {
+            font_size: Some(f64::NAN),
+            ..RunFormatting::default()
+        };
+        let pos_inf = RunFormatting {
+            font_size: Some(f64::INFINITY),
+            ..RunFormatting::default()
+        };
+        let neg_inf = RunFormatting {
+            font_size: Some(f64::NEG_INFINITY),
+            ..RunFormatting::default()
+        };
+        let nan_comments = RunFormatting {
+            comment_ids: Some(vec![f64::NAN]),
+            ..RunFormatting::default()
+        };
+        let nan_comments2 = RunFormatting {
+            comment_ids: Some(vec![f64::NAN]),
+            ..RunFormatting::default()
+        };
+        let nan_in_field = RunFormatting {
+            font_size: Some(12.0),
+            comment_ids: Some(vec![f64::NAN]),
+            ..RunFormatting::default()
+        };
+
+        for (a, b) in [
+            (&finite, &nan_size),
+            (&finite, &pos_inf),
+            (&nan_size, &nan_size2),
+            (&pos_inf, &neg_inf),
+            (&pos_inf, &nan_size),
+            (&nan_comments, &nan_comments2),
+            (&nan_comments, &nan_in_field),
+            (&nan_size, &nan_in_field),
+        ] {
+            assert_eq!(
+                formatting_equal(a, b),
+                serde_json::to_value(a).unwrap() == serde_json::to_value(b).unwrap(),
+                "{a:?} vs {b:?}"
+            );
+        }
+        assert!(formatting_equal(&nan_size, &nan_size2));
+        assert!(formatting_equal(&pos_inf, &neg_inf));
+        assert!(!formatting_equal(&finite, &nan_size));
+        assert!(!formatting_equal(&finite, &pos_inf));
+        assert!(formatting_equal(&nan_comments, &nan_comments2));
+        assert!(!formatting_equal(&nan_comments, &nan_in_field));
     }
 }

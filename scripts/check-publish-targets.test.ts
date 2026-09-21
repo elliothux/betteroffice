@@ -134,14 +134,16 @@ describe('crates.io publish targets', () => {
     expect(result.stderr).toContain('Initial crates.io release');
   });
 
-  test('a bootstrap token creates crates, so a missing one only prints', async () => {
+  test('a bootstrap token creates missing crates, so a missing one only prints', async () => {
     const result = await guard(
       '--crates',
       (name) => (name === crates[0] ? notFound() : Response.json({})),
       { CRATES_IO_BOOTSTRAP_TOKEN: 'cio_bootstrap' }
     );
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain(`${crates[0]} is not on crates.io; CRATES_IO_BOOTSTRAP_TOKEN`);
+    expect(result.stdout).toContain(
+      `${crates[0]} is not on crates.io; will be created with the bootstrap token.`
+    );
     expect(result.stderr).toBe('');
   });
 });
@@ -163,7 +165,7 @@ describe('release wiring', () => {
   });
 
   test('both registries are checked before the first upload of either', () => {
-    const publishes = ['Publish Rust crates', 'Release PR or publish'].map((step) =>
+    const publishes = ['Publish Node native bindings', 'Publish Rust crates', 'Release PR or publish'].map((step) =>
       steps.indexOf(step)
     );
     for (const guard of ['Check crates.io publish targets', 'Check npm publish targets']) {
@@ -179,6 +181,35 @@ describe('release wiring', () => {
       steps.indexOf('Pin workspace deps for npm publish')
     );
     for (const entry of packages) expect(Object.keys(entry).sort()).toEqual(['name', 'version']);
+  });
+});
+
+describe('crates OIDC-first wiring', () => {
+  const named = new Map(release.jobs.release.steps.map((step: any) => [step.name, step]));
+
+  test('the OIDC exchange always runs on the publish path', () => {
+    const auth = named.get('Authenticate to crates.io');
+    expect(auth.uses).toBe(
+      'rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18'
+    );
+    expect(auth.if).toBe("steps.pending.outputs.publishing == 'true'");
+  });
+
+  test('an OIDC failure continues only when the bootstrap token is detected', () => {
+    const auth = named.get('Authenticate to crates.io');
+    expect(auth['continue-on-error']).toBe(
+      "${{ steps.crates-bootstrap.outputs.enabled == 'true' }}"
+    );
+  });
+
+  test('the crates publish gets the OIDC token and the bootstrap token separately', () => {
+    const publish = named.get('Publish Rust crates');
+    expect(publish.env.CARGO_REGISTRY_TOKEN).toBe('${{ steps.crates-auth.outputs.token }}');
+    expect(publish.env.CRATES_IO_BOOTSTRAP_TOKEN).toBe('${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}');
+  });
+
+  test('the release job can mint OIDC tokens', () => {
+    expect(release.jobs.release.permissions['id-token']).toBe('write');
   });
 });
 

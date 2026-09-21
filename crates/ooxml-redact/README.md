@@ -1,6 +1,6 @@
 # BetterOffice redaction
 
-Structure-preserving redaction for DOCX, XLSX, and PPTX packages. Text becomes
+Structure-preserving redaction for DOCX, XLSX, PPTX, VSDX, and VSTX packages. Text becomes
 `x` runs (or independent random letters with `RedactionOptions {
 random_characters: true }`), numbers become `8` runs, formulas become `0`,
 dates become the epoch, booleans become `false`, and error values become
@@ -32,3 +32,26 @@ dates become the epoch, booleans become `false`, and error values become
 - Rich data and metadata: rich-value strings and key names, metadata values.
 - Document properties and custom properties; external-relationship targets
   become `https://example.com`.
+
+## Visio coverage
+
+VSDX drawings and VSTX templates use namespace-aware redaction regardless of
+where their XML parts live. Shape text, names, properties, user data, comments,
+external-data values, and other unrecognized attribute values are masked.
+Images use the shared blank-media policy. Standard geometry rows, numeric
+layout and formatting cells, and supported theme colors are preserved.
+
+Relationship IDs are renamed together with their references. Named rows receive
+unique anonymous names shared across the package so master inheritance still
+matches. Unsafe formulas on geometry cells use their numeric cached value when
+available; other unsafe formulas become `0`. Font names become Arial. These
+changes can affect text layout and formula behavior, so inspect a redacted repro
+before sharing it.
+
+Inputs and outputs must pass the Visio parser. Missing relationship references,
+ambiguous XML nesting, macro-enabled files, and stencils are refused. Part names,
+namespace declarations, content types, relationship types, and internal targets
+remain structural metadata and are preserved, as with the other formats.
+
+The CLI supports both local output and `--share`; the upload worker validates
+VSDX and VSTX separately using the OPC sanitizer.

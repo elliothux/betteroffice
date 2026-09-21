@@ -77,14 +77,16 @@
 //! italic, with no caps and no letter spacing.
 //!
 //! An inline image adds its declared width to the line advance and grows the
-//! line box by its column-fitted height, ignoring wrap distances. Alone on a line
-//! it takes a descent buffer above and below; flowing with text it seats on
-//! the baseline. A `topAndBottom` or block image takes its own line at its
-//! declared height plus wrap distances (default 6px, never column-fitted),
-//! adds no width, and opens a fresh line after it. An anchored floating
-//! image is positioned by the host, so it contributes neither width nor
-//! height — but its declared width still counts toward the following-runs
-//! width after a tab.
+//! line box by its declared height, ignoring wrap distances. One wider than the
+//! column keeps that height, overflows the margin the way Word's own rasters
+//! do, and never wraps off an empty line. Alone on a line its box is exactly
+//! the image; flowing with text it seats on the baseline. A
+//! `topAndBottom` or block image takes its own line at its declared height plus
+//! wrap distances (default 6px), adds no width, and opens a fresh line after
+//! it. An anchored floating image is positioned by the host, so it contributes
+//! neither width nor height — but its declared width still counts toward the
+//! following-runs width after a tab, and a line left carrying only floats
+//! keeps the paragraph mark's own line height.
 //!
 //! A visible list marker narrows the first line by its footprint, and only
 //! when the paragraph's hanging indent is exactly zero.
@@ -92,7 +94,9 @@
 //! # Float exclusion zones
 //!
 //! `floatingZones` and `paragraphYOffset` place the paragraph in the float
-//! group's coordinate space. Intersecting zones are resolved per line at the
+//! group's coordinate space; `paragraphYOffset` is the paragraph's top, so
+//! `spacing.before` lies inside that space and is tested with the first line.
+//! Intersecting zones are resolved per line at the
 //! running Y with a fixed probe height of `pt_to_px(defaults.fontSize)` —
 //! never the line's own fonts, which are unknown until the line closes. That
 //! running Y advances by each finalized line's *text* height, so image
@@ -334,6 +338,21 @@ pub fn measure_paragraph_typed(
     let paragraph_y_offset = request.paragraph_y_offset.unwrap_or(0.0);
     input::validate_float_context(zones, paragraph_y_offset)?;
 
+    // Snap-to-grid (§17.6.5 rule 4): the host gates the pitch to an
+    // activating grid type; the paragraph opts out with `w:snapToGrid`.
+    // An invalid pitch silently disables snapping rather than refusing the
+    // paragraph. Run-level opt-outs are resolved per line in the filler,
+    // which additionally snaps only `auto`-ruled lines (pinned
+    // `exact`/`atLeast` heights never snap).
+    let snap_pitch_px = attrs
+        .and_then(|a| a.doc_grid_pitch_px)
+        .filter(|pitch| pitch.is_finite() && *pitch > 0.0 && *pitch <= 100_000.0)
+        .filter(|_| attrs.and_then(|a| a.snap_to_grid) != Some(false));
+    let run_snaps: Vec<bool> = runs
+        .iter()
+        .map(|run| run.snap_to_grid != Some(false))
+        .collect();
+
     if runs.is_empty() {
         if attrs.is_some_and(|a| a.suppress_empty_paragraph_height) {
             return Ok(ParagraphExtentOut {
@@ -351,7 +370,15 @@ pub fn measure_paragraph_typed(
             .unwrap_or(&request.defaults.font_family);
         // Empty paragraphs use the regular face.
         let font = regular_chain_head(store, request, family)?;
-        return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &request.compat);
+        return line_filler::empty_paragraph_extent(
+            store,
+            font,
+            size_pt,
+            spacing,
+            &request.compat,
+            snap_pitch_px,
+            (zones, paragraph_y_offset),
+        );
     }
 
     // ---- single whitespace-only text run measures like an empty paragraph ----
@@ -368,7 +395,15 @@ pub fn measure_paragraph_typed(
             .or_else(|| attrs.and_then(|a| a.default_font_family.as_deref()))
             .unwrap_or(&request.defaults.font_family);
         let font = regular_chain_head(store, request, family)?;
-        return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &request.compat);
+        return line_filler::empty_paragraph_extent(
+            store,
+            font,
+            size_pt,
+            spacing,
+            &request.compat,
+            snap_pitch_px,
+            (zones, paragraph_y_offset),
+        );
     }
 
     // Visible markers consume width only at zero hanging.
@@ -380,6 +415,21 @@ pub fn measure_paragraph_typed(
     };
 
     let prepared = prepare::prepare_runs(store, request)?;
+
+    // The paragraph mark sizes any line that ends up with no font-bearing
+    // run — a float-only line, a trailing break, a hidden-only run.
+    let mark_size_pt = attrs
+        .and_then(|a| a.default_font_size)
+        .unwrap_or(request.defaults.font_size);
+    let mark_font = input::validate_pt_size(mark_size_pt, "attrs.defaultFontSize")
+        .ok()
+        .and_then(|()| {
+            let family = attrs
+                .and_then(|a| a.default_font_family.as_deref())
+                .unwrap_or(&request.defaults.font_family);
+            regular_chain_head(store, request, family).ok()
+        })
+        .map(|font| (font, mark_size_pt));
 
     // Left and right indents shrink both edges; first-line offset affects only the first line.
     let indent = attrs.and_then(|a| a.indent.as_ref());
@@ -408,6 +458,7 @@ pub fn measure_paragraph_typed(
         body_width,
         first_line_width,
         default_font_size_pt: request.defaults.font_size,
+        mark_font,
         compat: &request.compat,
         tabs: attrs.and_then(|a| a.tabs.as_deref()).unwrap_or(&[]),
         indent_left_px: indent_left,
@@ -415,6 +466,8 @@ pub fn measure_paragraph_typed(
         zones,
         paragraph_y_offset,
         authoritative_shaping: request.authoritative_shaping,
+        snap_pitch_px,
+        run_snaps: &run_snaps,
     })
 }
 
@@ -550,6 +603,7 @@ mod authoritative_tests {
             os2_typo_line_gap: -210,
             os2_fs_selection: 0x00c0,
             os2_version: 4,
+            os2_code_page_range1: 0,
             ..*store.metrics(id).unwrap()
         };
         store.replace_metrics_for_test(id, metrics).unwrap();
@@ -596,5 +650,31 @@ mod authoritative_tests {
         let extent = measure_paragraph(&store, &input).unwrap();
         assert!((extent.lines[0].width - 20.0).abs() < 0.001);
         assert!(extent.lines[0].line_height >= 80.0);
+    }
+
+    #[test]
+    fn an_inline_image_wider_than_the_column_keeps_its_declared_box() {
+        let store = FontStore::new();
+        let measure = |max_width: f64| {
+            let input: MeasureInput = serde_json::from_value(serde_json::json!({
+                "block": {
+                    "kind": "paragraph",
+                    "runs": [{ "kind": "image", "width": 220.0, "height": 400.0 }]
+                },
+                "maxWidth": max_width,
+                "defaults": { "fontSize": 12.0, "fontFamily": "Fallback" }
+            }))
+            .unwrap();
+            measure_paragraph(&store, &input).unwrap()
+        };
+
+        let over_wide = measure(200.0);
+        let fits = measure(300.0);
+
+        assert_eq!(over_wide.lines.len(), 1);
+        assert!((over_wide.lines[0].width - 220.0).abs() < 0.001);
+        assert_eq!(over_wide.lines[0].line_height, fits.lines[0].line_height);
+        assert_eq!(over_wide.total_height, fits.total_height);
+        assert!(over_wide.lines[0].line_height >= 400.0);
     }
 }

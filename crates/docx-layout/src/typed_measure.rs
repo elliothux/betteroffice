@@ -7,8 +7,9 @@
 //! synthetic extent, exactly as an `"invalid: "` error used to.
 
 use ooxml_text::measure::{
-    AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatZoneIn, FontChains, IndentIn, MeasureRequest,
-    RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn, SpacingIn, TabStopIn,
+    AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChains, IndentIn,
+    MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn, SpacingIn,
+    TabStopIn,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -114,7 +115,20 @@ fn zone_in(zone: &FloatingZone) -> Option<FloatZoneIn> {
         right_margin: finite(zone.right_margin)?,
         top_y: finite(zone.top_y)?,
         bottom_y: finite(zone.bottom_y)?,
-        segments: None,
+        segments: match zone.segments.as_slice() {
+            [] => None,
+            strips => Some(
+                strips
+                    .iter()
+                    .map(|strip| {
+                        Some(FloatSegmentIn {
+                            left_offset: finite(strip.left_offset)?,
+                            available_width: finite(strip.available_width)?,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+        },
         full_width_block: zone.full_width_block,
     })
 }
@@ -151,6 +165,10 @@ fn attrs_in(attrs: &ParagraphAttrs) -> Option<AttrsIn> {
         list_marker_italic: attrs.list_marker_italic.unwrap_or(false),
         list_marker_suffix: attrs.list_marker_suffix.clone(),
         default_tab_stop_twips: attrs.default_tab_stop_twips.and_then(finite),
+        doc_grid_pitch_px: attrs.doc_grid_pitch_px.and_then(finite),
+        snap_to_grid: attrs.snap_to_grid,
+        auto_space_de: attrs.auto_space_de,
+        auto_space_dn: attrs.auto_space_dn,
     })
 }
 
@@ -211,6 +229,7 @@ fn formatted_run(kind: &str, fmt: &RunFormatting) -> RunIn {
     out.subscript = fmt.subscript.unwrap_or(false);
     out.hidden = fmt.hidden.unwrap_or(false);
     out.rtl = fmt.rtl.unwrap_or(false);
+    out.snap_to_grid = fmt.snap_to_grid;
     out
 }
 
@@ -237,6 +256,7 @@ fn bare_run(kind: &str) -> RunIn {
         subscript: false,
         hidden: false,
         rtl: false,
+        snap_to_grid: None,
         fallback: None,
         width: None,
         height: None,
@@ -815,6 +835,7 @@ mod parity_tests {
             right_margin: 10.0,
             top_y: -5.0,
             bottom_y: 40.0,
+            segments: Vec::new(),
             full_width_block: false,
         }];
         assert_parity(
@@ -1110,6 +1131,7 @@ mod parity_tests {
                     right_margin: 8.0,
                     top_y: -4.0,
                     bottom_y: 60.0,
+                    segments: Vec::new(),
                     full_width_block: full_width,
                 }]
             });
@@ -1318,6 +1340,7 @@ mod parity_tests {
                         right_margin: zone[1],
                         top_y: zone[2],
                         bottom_y: zone[3],
+                        segments: Vec::new(),
                         full_width_block: false,
                     }]
                 });

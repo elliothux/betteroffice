@@ -291,7 +291,7 @@ fn random_characters_preserve_each_office_format() {
             Format::Pptx => {
                 pptx_parse::parse_pptx(&output).unwrap();
             }
-            Format::Auto => unreachable!(),
+            Format::Auto | Format::Vsdx | Format::Vstx => unreachable!(),
         }
         let default = redact(&source, format).unwrap();
         let explicit_default = redact_with_options(&source, format, &Default::default()).unwrap();
@@ -3525,38 +3525,472 @@ fn media_replacement_never_copies_source_bytes() {
     assert_eq!(parts, ooxml_opc::unzip_parts(&other).unwrap());
 }
 
+const VSDX_SECRETS: &[&str] = &[
+    "VSDX_SECRET_PROPERTY_VALUE",
+    "VSDX_SECRET_PROPERTY_PROMPT",
+    "VSDX_SECRET_PROPERTY_LABEL",
+    "VSDX_SECRET_FORMULA",
+    "VSDX_SECRET_FORMULA_VALUE",
+    "VSDX_SECRET_USER_VALUE",
+    "VSDX_SECRET_USER_PROMPT",
+    "VSDX_SECRET_SHAPE_TEXT",
+    "VSDX_SECRET_CORE",
+];
+
 #[test]
-fn refuses_visio_with_uncovered_sensitive_surfaces() {
-    let source = package(vec![
+fn vsdx_property_user_and_text_are_redacted() {
+    let source = vsdx_fixture("application/vnd.ms-visio.drawing.main+xml");
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.format, Format::Vsdx);
+    let text = String::from_utf8_lossy(&output).into_owned();
+    for secret in VSDX_SECRETS {
+        assert!(!text.contains(secret), "secret survived: {secret}");
+    }
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let page = String::from_utf8_lossy(part(&parts, "visio/pages/page1.xml")).into_owned();
+    for preserved in [
+        "V=\"2.5\"",
+        "V=\"7.5\"",
+        "N=\"Property\"",
+        "N=\"User\"",
+        "ID=\"1\"",
+        "Type=\"Shape\"",
+    ] {
+        assert!(
+            page.contains(preserved),
+            "structural value lost: {preserved}"
+        );
+    }
+    assert!(page.contains("N=\"PinX\""));
+    assert!(page.contains("N=\"Width\""));
+    assert!(
+        !page.contains("VSDX_SHAPE_NAMEU"),
+        "shape NameU must not survive deny-by-default"
+    );
+    assert_eq!(detect_format(&output).unwrap(), Format::Vsdx);
+}
+
+#[test]
+fn vstx_is_accepted_with_the_same_policy() {
+    let source = vsdx_fixture("application/vnd.ms-visio.template.main+xml");
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.format, Format::Vstx);
+    let text = String::from_utf8_lossy(&output).into_owned();
+    for secret in VSDX_SECRETS {
+        assert!(!text.contains(secret), "secret survived: {secret}");
+    }
+    assert_eq!(detect_format(&output).unwrap(), Format::Vstx);
+}
+
+const VSDX_FULL_SENTINELS: &[&str] = &[
+    "SENTINELSHAPETEXTALPHA",
+    "SENTINELPROPROWNAMEBETA",
+    "SENTINELPROPVALGAMMA",
+    "SENTINELPROPPROMPTDELTA",
+    "SENTINELPROPLABELEPSILON",
+    "SENTINELPROPFORMULAZETA",
+    "SENTINELPROPFORMULAVALUEETA",
+    "SENTINELUSERROWNAMETHETA",
+    "SENTINELUSERVALIOTA",
+    "SENTINELUSERPROMPTKAPPA",
+    "SENTINELCOMMENTAUTHORLAMBDA",
+    "SENTINELCOMMENTBODYMU",
+    "SENTINELHYPERADDRNU",
+    "SENTINELHYPERSUBXI",
+    "SENTINELHYPERDESCOMICRON",
+    "SENTINELHYPERRELRHO",
+    "SENTINELFIELDVALSIGMA",
+    "SENTINELSHAPENAMETAU",
+    "SENTINELSHAPENAMEUUPSILON",
+    "SENTINELRECORDSETVALPHI",
+    "SENTINELRECORDSETNAMECHI",
+    "SENTINELRECORDSETCMDPSI",
+    "SENTINELDATACONNSTROMEGA",
+    "SENTINELDATACONNCMDALPHA",
+    "SENTINELCUSTOMPROPVALBETA",
+    "SENTINELCUSTOMPROPNAMEGAMMA",
+    "SENTINELCOREPROPDELTA",
+    "SENTINELAPPCOMPANYEPSILON",
+    "SENTINELUNKNOWNSECTIONVALZETA",
+    "SENTINELUNKNOWNSECTIONNAMEETA",
+    "SENTINELUNKNOWNCELLNAMETHETA",
+    "SENTINELPAGENAMEUIOTA",
+    "SENTINELPAGENAMEKAPPA",
+    "SENTINELFONTFACELAMBDA",
+    "SENTINELSTYLESHEETMU",
+    "SENTINELACTIONMENUNU",
+    "SENTINELLAYERROWNAMEXI",
+    "SENTINELSCRATCHVALOMICRON",
+];
+
+#[test]
+fn vsdx_deny_by_default_scrubs_every_surface() {
+    let source = vsdx_full_fixture();
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.format, Format::Vsdx);
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let before = ooxml_opc::unzip_parts(&source).unwrap();
+    assert_eq!(
+        part_names(&before),
+        part_names(&parts),
+        "redaction must preserve the part inventory"
+    );
+    for secret in VSDX_FULL_SENTINELS {
+        for (path, bytes) in &parts {
+            assert!(
+                !String::from_utf8_lossy(bytes).contains(secret),
+                "secret {secret} survived in {path}"
+            );
+        }
+    }
+    let page = String::from_utf8_lossy(part(&parts, "visio/pages/page1.xml")).into_owned();
+    for preserved in [
+        "V=\"2.5\"",
+        "V=\"7.5\"",
+        "N=\"Property\"",
+        "N=\"User\"",
+        "N=\"Geometry\"",
+        "N=\"Character\"",
+        "N=\"Paragraph\"",
+        "N=\"Hyperlink\"",
+        "N=\"Field\"",
+        "ID=\"1\"",
+        "Type=\"Shape\"",
+        "T=\"MoveTo\"",
+    ] {
+        assert!(
+            page.contains(preserved),
+            "structural value lost: {preserved}"
+        );
+    }
+    let rels =
+        String::from_utf8_lossy(part(&parts, "visio/pages/_rels/page1.xml.rels")).into_owned();
+    for preserved in ["TargetMode=\"External\"", "https://example.com"] {
+        assert!(
+            rels.contains(preserved),
+            "structural value lost: {preserved}"
+        );
+    }
+    assert_eq!(detect_format(&output).unwrap(), Format::Vsdx);
+    for (path, bytes) in &parts {
+        if path.ends_with(".xml") || path.ends_with(".rels") {
+            let mut reader = Reader::from_reader(bytes.as_slice());
+            loop {
+                match reader.read_event() {
+                    Ok(Event::Eof) => break,
+                    Ok(_) => {}
+                    Err(error) => panic!("part {path} is not well-formed XML: {error}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vsdx_relationship_references_reject_author_text() {
+    let input = "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:other=\"urn:other\"><Page ID=\"1\" NameU=\"Page-1\"><Rel r:id=\"rId1\"/></Page><Page ID=\"2\" NameU=\"Page-2\"><Rel r:id=\"rIdSECRETLEAK\"/></Page><Page ID=\"3\" NameU=\"Page-3\"><Rel other:id=\"rIdSECRETLEAK\"/></Page><Shape ID=\"4\" Type=\"Shape\" r:id=\"rIdSECRETLEAK\"/></Pages>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/pages.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SECRETLEAK"),
+        "author text in a relationship reference survived: {text}"
+    );
+    assert!(
+        text.contains("r:id=\"rId1\""),
+        "declared relationship reference lost: {text}"
+    );
+}
+
+#[test]
+fn vsdx_element_level_relationship_references_survive() {
+    let input = "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><Page ID=\"1\" NameU=\"Page-1\" r:id=\"rId1\"/><Page ID=\"2\" NameU=\"Page-2\" r:id=\"rIdSECRETLEAK\"/></Pages>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/pages.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        text.contains("r:id=\"rId1\""),
+        "element-level relationship reference lost: {text}"
+    );
+    assert!(
+        !text.contains("SECRETLEAK"),
+        "author text in an element-level reference survived: {text}"
+    );
+}
+
+#[test]
+fn vsdx_typed_attributes_keep_valid_values() {
+    let input = "<Comments xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Comment Author=\"SENTINELCOMMENTAUTHOR\" Date=\"2026-01-02T03:04:05Z\">SENTINELCOMMENTBODY</Comment></Comments>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/comments.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SENTINEL"),
+        "comment secret survived: {text}"
+    );
+    assert!(
+        !text.contains("2026-01-02"),
+        "comment date survived: {text}"
+    );
+    assert!(
+        text.contains("Date=\"1970-01-01T00:00:00Z\""),
+        "comment date lost its dateTime shape: {text}"
+    );
+    let input = "<Masters xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Master ID=\"2\" NameU=\"Rectangle\" UniqueID=\"{08840884-0002-0000-8E40-00608CF305B2}\" BaseID=\"{265F9737-E810-4325-8E7F-292854638452}\"/></Masters>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/masters/masters.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("08840884"), "master GUID survived: {text}");
+    assert!(!text.contains("265F9737"), "master GUID survived: {text}");
+    assert!(
+        text.matches("{00000000-0000-0000-0000-000000000000}")
+            .count()
+            == 2,
+        "master GUIDs lost their GUID shape: {text}"
+    );
+    let input = "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Page ID=\"0\" NameU=\"Page-1\"><PageSheet LineStyle=\"3\" FillStyle=\"SECRET\"/><Shape ID=\"SECRET\" Type=\"Shape\"/></Page></Pages>";
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/pages.xml",
+        input.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SECRET"),
+        "identifier secret survived: {text}"
+    );
+    assert!(
+        text.contains("LineStyle=\"3\""),
+        "numeric style reference outside Shape lost: {text}"
+    );
+    assert!(
+        text.contains("FillStyle=\"0\"") && text.contains("ID=\"0\""),
+        "rejected numerics lost their integer shape: {text}"
+    );
+}
+
+fn vsdx_full_fixture() -> Vec<u8> {
+    let shape = "<Cell N=\"PinX\" V=\"2.5\"/><Cell N=\"PinY\" V=\"7.5\"/><Cell N=\"Width\" V=\"2\"/><Cell N=\"Height\" V=\"1\"/><Section N=\"Property\"><Row N=\"SENTINELPROPROWNAMEBETA\"><Cell N=\"Value\" V=\"SENTINELPROPVALGAMMA\"/><Cell N=\"Prompt\" V=\"SENTINELPROPPROMPTDELTA\"/><Cell N=\"Label\" V=\"SENTINELPROPLABELEPSILON\"/></Row><Row N=\"FormulaRow\"><Cell N=\"Value\" F=\"=SENTINELPROPFORMULAZETA\" V=\"SENTINELPROPFORMULAVALUEETA\"/></Row></Section><Section N=\"User\"><Row N=\"SENTINELUSERROWNAMETHETA\"><Cell N=\"Value\" V=\"SENTINELUSERVALIOTA\"/><Cell N=\"Prompt\" V=\"SENTINELUSERPROMPTKAPPA\"/></Row></Section><Section N=\"Hyperlink\"><Row N=\"LinkRow\"><Cell N=\"Address\" V=\"SENTINELHYPERADDRNU\"/><Cell N=\"SubAddress\" V=\"SENTINELHYPERSUBXI\"/><Cell N=\"Description\" V=\"SENTINELHYPERDESCOMICRON\"/></Row></Section><Section N=\"Field\"><Row IX=\"0\"><Cell N=\"Value\" V=\"SENTINELFIELDVALSIGMA\"/></Row></Section><Section N=\"Action\"><Row N=\"ActionRow\"><Cell N=\"Menu\" V=\"SENTINELACTIONMENUNU\"/></Row></Section><Section N=\"Layer\"><Row N=\"SENTINELLAYERROWNAMEXI\"><Cell N=\"Visible\" V=\"1\"/></Row></Section><Section N=\"Scratch\"><Row IX=\"0\"><Cell N=\"A\" V=\"SENTINELSCRATCHVALOMICRON\"/></Row></Section><Section N=\"QuantumSection\"><Row IX=\"0\"><Cell N=\"QuantumCell\" V=\"SENTINELUNKNOWNSECTIONVALZETA\"/><Cell N=\"SENTINELUNKNOWNCELLNAMETHETA\" V=\"1\"/></Row></Section><Section N=\"SENTINELUNKNOWNSECTIONNAMEETA\"><Row IX=\"0\"><Cell N=\"X\" V=\"1\"/></Row></Section><Section N=\"Geometry\"><Row IX=\"0\" T=\"MoveTo\"><Cell N=\"X\" V=\"0\"/><Cell N=\"Y\" V=\"0\"/></Row></Section><Section N=\"Character\"><Row IX=\"0\"><Cell N=\"Font\" V=\"0\"/><Cell N=\"Size\" V=\"0.25\"/><Cell N=\"Color\" V=\"0\"/></Row></Section><Section N=\"Paragraph\"><Row IX=\"0\"><Cell N=\"HorzAlign\" V=\"1\"/></Row></Section><Text>SENTINELSHAPETEXTALPHA<cp IX=\"0\"/><pp IX=\"0\"/><fld IX=\"0\"/></Text>";
+    package(vec![
         (
             "[Content_Types].xml",
             xml(
-                r#"<Types><Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/></Types>"#,
+                "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/visio/document.xml\" ContentType=\"application/vnd.ms-visio.drawing.main+xml\"/><Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/><Override PartName=\"/docProps/app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/><Override PartName=\"/docProps/custom.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.custom-properties+xml\"/></Types>",
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/visio/2010/relationships/document\" Target=\"visio/document.xml\"/></Relationships>",
+            ),
+        ),
+        (
+            "docProps/core.xml",
+            xml(
+                "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:creator>SENTINELCOREPROPDELTA</dc:creator><dc:title>SENTINELCOREPROPDELTA</dc:title></cp:coreProperties>",
+            ),
+        ),
+        (
+            "docProps/app.xml",
+            xml(
+                "<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Company>SENTINELAPPCOMPANYEPSILON</Company></Properties>",
+            ),
+        ),
+        (
+            "docProps/custom.xml",
+            xml(
+                "<cp:Properties xmlns:cp=\"http://schemas.openxmlformats.org/officeDocument/2006/custom-properties\" xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\"><cp:property name=\"SENTINELCUSTOMPROPNAMEGAMMA\" pid=\"2\"><vt:lpwstr>SENTINELCUSTOMPROPVALBETA</vt:lpwstr></cp:property></cp:Properties>",
             ),
         ),
         (
             "visio/document.xml",
             xml(
-                r#"<VisioDocument><CommentList><CommentEntry Author="SECRET_AUTHOR">SECRET_COMMENT</CommentEntry></CommentList></VisioDocument>"#,
+                "<VisioDocument xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><FaceNames><FaceName ID=\"0\" Name=\"SENTINELFONTFACELAMBDA\"/></FaceNames><StyleSheets><StyleSheet ID=\"0\" NameU=\"SENTINELSTYLESHEETMU\"><Cell N=\"LineColor\" V=\"0\"/></StyleSheet></StyleSheets><DocumentSheet><Cell N=\"PageWidth\" V=\"8.5\"/></DocumentSheet></VisioDocument>",
+            ),
+        ),
+        (
+            "visio/_rels/document.xml.rels",
+            xml(
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/visio/2010/relationships/pages\" Target=\"pages/pages.xml\"/></Relationships>",
+            ),
+        ),
+        (
+            "visio/pages/pages.xml",
+            xml(
+                "<Pages xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Page ID=\"1\" NameU=\"SENTINELPAGENAMEUIOTA\" Name=\"SENTINELPAGENAMEKAPPA\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:id=\"rId1\"><PageSheet><Cell N=\"PageWidth\" V=\"8.5\"/></PageSheet></Page></Pages>",
+            ),
+        ),
+        (
+            "visio/pages/_rels/pages.xml.rels",
+            xml(
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.microsoft.com/visio/2010/relationships/page\" Target=\"page1.xml\"/></Relationships>",
             ),
         ),
         (
             "visio/pages/page1.xml",
+            xml(&format!(
+                "<PageContents xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Shapes><Shape ID=\"1\" Name=\"SENTINELSHAPENAMETAU\" NameU=\"SENTINELSHAPENAMEUUPSILON\" Type=\"Shape\">{shape}</Shape></Shapes><Connects><Connect FromSheet=\"1\" FromCell=\"BeginX\" ToSheet=\"1\" ToCell=\"PinX\"/></Connects></PageContents>"
+            )),
+        ),
+        (
+            "visio/pages/_rels/page1.xml.rels",
             xml(
-                r#"<PageContents><Shape ID="1" Name="SECRET_SHAPE" NameU="SECRET_SHAPE_UNIVERSAL"><Section N="Hyperlink"><Row N="Link"><Cell N="Address" V="https://SECRET_HOST"/></Row></Section><Section N="Field"><Row IX="0"><Cell N="Value" V="SECRET_FIELD"/></Row></Section></Shape></PageContents>"#,
+                "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://SENTINELHYPERRELRHO.example\" TargetMode=\"External\"/></Relationships>",
             ),
         ),
         (
-            "visio/data/recordsets.xml",
+            "visio/comments.xml",
             xml(
-                r#"<DataRecordSets><DataRecordSet Name="SECRET_DATABASE" Command="SELECT SECRET_COLUMN FROM SECRET_TABLE"/></DataRecordSets>"#,
+                "<Comments xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\"><Comment Author=\"SENTINELCOMMENTAUTHORLAMBDA\" Date=\"2026-01-02T03:04:05Z\">SENTINELCOMMENTBODYMU</Comment></Comments>",
             ),
         ),
-    ]);
-    assert!(
-        redact(&source, Format::Auto).is_err(),
-        "an incomplete Visio policy must never emit a supposedly redacted package"
+        (
+            "visio/recordsets/recordset1.xml",
+            xml(
+                "<RecordSet xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\" Name=\"SENTINELRECORDSETNAMECHI\" Command=\"SENTINELRECORDSETCMDPSI\"><Row><Cell>SENTINELRECORDSETVALPHI</Cell></Row></RecordSet>",
+            ),
+        ),
+        (
+            "visio/dataConnections/dataConnection1.xml",
+            xml(
+                "<DataConnection xmlns=\"http://schemas.microsoft.com/office/visio/2012/main\" ConnectionString=\"SENTINELDATACONNSTROMEGA\" Command=\"SENTINELDATACONNCMDALPHA\"/>",
+            ),
+        ),
+    ])
+}
+
+#[test]
+fn vsdm_is_refused_with_a_clear_message() {
+    let source = vsdx_fixture("application/vnd.ms-visio.drawing.macroenabled.main+xml");
+    let error = redact(&source, Format::Auto).unwrap_err();
+    assert!(matches!(error, RedactError::UnsupportedVisio));
+    assert!(error.to_string().contains("Visio"));
+}
+
+#[test]
+fn vssx_stencils_are_out_of_scope() {
+    let source = vsdx_fixture("application/vnd.ms-visio.stencil.main+xml");
+    assert!(matches!(
+        redact(&source, Format::Auto).unwrap_err(),
+        RedactError::UnsupportedVisio
+    ));
+    assert!(matches!(
+        detect_format(&source).unwrap_err(),
+        RedactError::UnsupportedVisio
+    ));
+}
+
+#[test]
+fn visio_ambiguous_nesting_is_refused_not_partially_redacted() {
+    let source = vsdx_fixture_with_shape(
+        "application/vnd.ms-visio.drawing.main+xml",
+        "<Section N=\"Property\"><Section N=\"User\"><Row><Cell N=\"Value\" V=\"VSDX_SECRET_NESTED\"/></Row></Section></Section>",
     );
+    let error = redact(&source, Format::Auto).unwrap_err();
+    assert!(
+        matches!(error, RedactError::AmbiguousVisio { .. }),
+        "nested Section must refuse, got: {error:?}"
+    );
+    let source = vsdx_fixture_with_shape(
+        "application/vnd.ms-visio.drawing.main+xml",
+        "<Section><Row><Cell N=\"Value\" V=\"VSDX_SECRET_UNNAMED\"/></Row></Section>",
+    );
+    assert!(matches!(
+        redact(&source, Format::Auto),
+        Err(RedactError::AmbiguousVisio { .. })
+    ));
+    for shape in [
+        "<Row><Cell N=\"Value\" V=\"VSDX_SECRET_OUTSIDE\"/></Row>",
+        "<Section N=\"Property\"><Cell N=\"Value\" V=\"VSDX_SECRET_ROWLESS\"/></Section>",
+    ] {
+        let source = vsdx_fixture_with_shape("application/vnd.ms-visio.drawing.main+xml", shape);
+        let output = redact(&source, Format::Auto).unwrap();
+        for (_, bytes) in ooxml_opc::unzip_parts(&output).unwrap() {
+            assert!(!String::from_utf8_lossy(&bytes).contains("VSDX_SECRET"));
+        }
+    }
+}
+
+fn vsdx_fixture(main_content_type: &str) -> Vec<u8> {
+    vsdx_fixture_with_shape(
+        main_content_type,
+        "<Cell N=\"PinX\" V=\"2.5\"/><Cell N=\"PinY\" V=\"7.5\"/><Cell N=\"Width\" V=\"2\"/><Cell N=\"Height\" V=\"1\"/><Section N=\"Property\"><Row N=\"Contract\"><Cell N=\"Value\" V=\"VSDX_SECRET_PROPERTY_VALUE\"/><Cell N=\"Prompt\" V=\"VSDX_SECRET_PROPERTY_PROMPT\"/><Cell N=\"Label\" V=\"VSDX_SECRET_PROPERTY_LABEL\"/></Row><Row N=\"Formula\"><Cell N=\"Value\" F=\"=VSDX_SECRET_FORMULA\" V=\"VSDX_SECRET_FORMULA_VALUE\"/></Row></Section><Section N=\"User\"><Row N=\"Owner\"><Cell N=\"Value\" V=\"VSDX_SECRET_USER_VALUE\"/><Cell N=\"Prompt\" V=\"VSDX_SECRET_USER_PROMPT\"/></Row></Section><Section N=\"Geometry\"><Row IX=\"0\" T=\"MoveTo\"><Cell N=\"X\" V=\"0\"/><Cell N=\"Y\" V=\"0\"/></Row></Section><Text>VSDX_SECRET_SHAPE_TEXT</Text>",
+    )
+}
+
+fn vsdx_fixture_with_shape(main_content_type: &str, shape_inner: &str) -> Vec<u8> {
+    package(vec![
+        (
+            "[Content_Types].xml",
+            xml(&format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/visio/document.xml" ContentType="{main_content_type}"/></Types>"#
+            )),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/document" Target="visio/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "docProps/core.xml",
+            xml(
+                r#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>VSDX_SECRET_CORE</dc:creator></cp:coreProperties>"#,
+            ),
+        ),
+        (
+            "visio/document.xml",
+            xml(
+                r#"<VisioDocument xmlns="http://schemas.microsoft.com/office/visio/2012/main"><DocumentSheet><Cell N="PageWidth" V="8.5"/></DocumentSheet></VisioDocument>"#,
+            ),
+        ),
+        (
+            "visio/_rels/document.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/pages" Target="pages/pages.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "visio/pages/pages.xml",
+            xml(
+                r#"<Pages xmlns="http://schemas.microsoft.com/office/visio/2012/main"><Page ID="1" NameU="Page-1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"><PageSheet><Cell N="PageWidth" V="8.5"/></PageSheet></Page></Pages>"#,
+            ),
+        ),
+        (
+            "visio/pages/_rels/pages.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/page" Target="page1.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "visio/pages/page1.xml",
+            xml(&format!(
+                r#"<PageContents xmlns="http://schemas.microsoft.com/office/visio/2012/main"><Shapes><Shape ID="1" NameU="VSDX_SHAPE_NAMEU" Type="Shape">{shape_inner}</Shape></Shapes></PageContents>"#
+            )),
+        ),
+    ])
 }
 
 #[test]

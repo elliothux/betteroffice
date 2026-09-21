@@ -17,6 +17,35 @@ export function bindingVersion(path) {
   return manifest(path).version;
 }
 
+export function synchronizeNodeLoader(source, from, to) {
+  const versions = [...source.matchAll(/bindingPackageVersion !== '([^']+)'/g)];
+  if (versions.length === 0 || versions.some((match) => match[1] !== from)) {
+    throw new Error(`Native loader is not synchronized at ${from}`);
+  }
+  return source
+    .replaceAll(`bindingPackageVersion !== '${from}'`, `bindingPackageVersion !== '${to}'`)
+    .replaceAll(`version mismatch, expected ${from} but got`, `version mismatch, expected ${to} but got`);
+}
+
+export function validateNodeVersions() {
+  for (const path of NODE_BINDINGS) {
+    const version = bindingVersion(path);
+    if (bindingVersion(`packages/${bindingName(path)}`) !== version) {
+      throw new Error(`${path} must match its core package version`);
+    }
+    for (const identity of readdirSync(new URL(`../${path}/npm`, import.meta.url))) {
+      if (bindingVersion(`${path}/npm/${identity}`) !== version) {
+        throw new Error(`${path}/npm/${identity} must match ${version}`);
+      }
+    }
+    synchronizeNodeLoader(
+      readFileSync(new URL(`../${path}/index.js`, import.meta.url), 'utf8'),
+      version,
+      version
+    );
+  }
+}
+
 export function platformPackageVersions() {
   return NODE_BINDINGS.flatMap((path) =>
     readdirSync(new URL(`../${path}/npm`, import.meta.url)).map((identity) => {

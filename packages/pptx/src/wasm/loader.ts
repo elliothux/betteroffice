@@ -1,4 +1,5 @@
 import initWasmModule, {
+  decodeTiffPng,
   parsePptxJson,
   PptxDocument,
   PptxRenderer,
@@ -19,8 +20,11 @@ import type {
   HistoryResult,
   HitTestResult,
   ParagraphAlignment,
+  PictureDraft,
   PresetShapeDraft,
   PptxFontFace,
+  PptxTextMatch,
+  PptxTextSearchOptions,
   ShapeAdjustReceipt,
   ShapeDraft,
   ShapeFillReceipt,
@@ -28,6 +32,7 @@ import type {
   ShapeRect,
   ShapeStroke,
   ShapeStrokeReceipt,
+  ShapeZOrderReceipt,
   SlideDisplayList,
   SlideReceipt,
   StorySnapshot,
@@ -63,6 +68,8 @@ export interface PresentationHandle extends CollaborationReplica {
   readonly clientId: number;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
+  /** Literal search in slide order. */
+  searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
   layoutSlide(slideIndex: number): SlideDisplayList;
   hitTest(x: number, y: number): HitTestResult | null;
@@ -88,6 +95,7 @@ export interface PresentationHandle extends CollaborationReplica {
   setSlideNotes(slideId: string, text: string): void;
   addTextBox(slideId: string, draft: ShapeDraft): ShapeReceipt;
   addShape(slideId: string, draft: PresetShapeDraft): ShapeReceipt;
+  addPicture(slideId: string, draft: PictureDraft): ShapeReceipt;
   setShapeFill(slideId: string, shapeId: string, color: string | null): ShapeFillReceipt;
   setShapeStroke(
     slideId: string,
@@ -100,6 +108,14 @@ export interface PresentationHandle extends CollaborationReplica {
     adjustments: Record<string, number>
   ): ShapeAdjustReceipt;
   removeShape(slideId: string, shapeId: string): ShapeReceipt;
+  /** Moves a shape to the top of its slide's paint order (drawn last). */
+  bringShapeToFront(slideId: string, shapeId: string): ShapeZOrderReceipt;
+  /** Moves a shape to the bottom of its slide's paint order (drawn first). */
+  sendShapeToBack(slideId: string, shapeId: string): ShapeZOrderReceipt;
+  /** Swaps a shape one step later in its slide's paint order. */
+  bringShapeForward(slideId: string, shapeId: string): ShapeZOrderReceipt;
+  /** Swaps a shape one step earlier in its slide's paint order. */
+  sendShapeBackward(slideId: string, shapeId: string): ShapeZOrderReceipt;
   /** Adds a slide comment; coordinates are EMU. */
   addComment(
     slideId: string,
@@ -177,6 +193,11 @@ export function wasmVersion(): string {
 export function inspectPresentation(bytes: Uint8Array): unknown {
   requireInitialized();
   return call(() => parsePptxJson(bytes));
+}
+
+export function decodeTiffImage(bytes: Uint8Array): Uint8Array {
+  requireInitialized();
+  return construct(() => decodeTiffPng(bytes));
 }
 
 export function openPresentation(
@@ -330,6 +351,20 @@ export function openPresentation(
     story(storyId: string): StorySnapshot {
       return jsonWasmCall(() => doc.storyJson(JSON.stringify({ storyId })));
     },
+    searchText(query, options = {}) {
+      if (!query) return [];
+      const limit = options.limit ?? Number.POSITIVE_INFINITY;
+      if ((!Number.isSafeInteger(limit) && limit !== Number.POSITIVE_INFINITY) || limit < 0) {
+        throw new RangeError('search limit must be a non-negative safe integer');
+      }
+      return jsonWasmCall(() =>
+        doc.searchTextJson(JSON.stringify({
+          query,
+          caseSensitive: options.caseSensitive ?? false,
+          limit: Number.isFinite(limit) ? Math.min(limit, 0xffffffff) : undefined,
+        }))
+      );
+    },
     registerFont(face: PptxFontFace): number {
       return wasmCall(() => registerFont(renderer, face));
     },
@@ -448,6 +483,9 @@ export function openPresentation(
     addShape(slideId, draft): ShapeReceipt {
       return jsonWasmCall(() => doc.addShapeJson(JSON.stringify({ slideId, draft })), true);
     },
+    addPicture(slideId, draft): ShapeReceipt {
+      return jsonWasmCall(() => doc.addPictureJson(JSON.stringify({ slideId, ...draft })), true);
+    },
     setShapeFill(slideId, shapeId, color): ShapeFillReceipt {
       return jsonWasmCall(
         () => doc.setShapeFillJson(JSON.stringify({ slideId, shapeId, color })),
@@ -469,6 +507,30 @@ export function openPresentation(
     removeShape(slideId, shapeId): ShapeReceipt {
       return jsonWasmCall(
         () => doc.removeShapeJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    bringShapeToFront(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.bringShapeToFrontJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    sendShapeToBack(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.sendShapeToBackJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    bringShapeForward(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.bringShapeForwardJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    sendShapeBackward(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.sendShapeBackwardJson(JSON.stringify({ slideId, shapeId })),
         true
       );
     },

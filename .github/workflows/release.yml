@@ -87,14 +87,11 @@ jobs:
         run: |
           if [ -n "$TOKEN" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "CRATES_IO_BOOTSTRAP_TOKEN is set: crates missing from crates.io will be created with it."
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "CRATES_IO_BOOTSTRAP_TOKEN is unset: every crate must already exist on crates.io."
           fi
-
-      - name: Authenticate to crates.io
-        id: crates-auth
-        if: steps.pending.outputs.publishing == 'true' && steps.crates-bootstrap.outputs.enabled != 'true'
-        uses: rust-lang/crates-io-auth-action@v1
 
       # Both registries are checked before the first upload: a guard that fails
       # after the crates publish leaves the release half-published.
@@ -120,7 +117,9 @@ jobs:
         run: |
           status=0
           runs=""
-          for binding in $(node scripts/node-bindings.mjs --pending | jq -r '.[]'); do
+          pending=$(node scripts/node-bindings.mjs --pending)
+          bindings=$(printf '%s' "$pending" | jq -er '.[]' || [ "$pending" = '[]' ])
+          for binding in $bindings; do
             if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
               "repos/$GH_REPO/actions/workflows/publish-node-binding.yml/dispatches" \
               -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
@@ -142,10 +141,17 @@ jobs:
           done
           exit $status
 
+      - name: Authenticate to crates.io
+        id: crates-auth
+        if: steps.pending.outputs.publishing == 'true'
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
+        continue-on-error: ${{ steps.crates-bootstrap.outputs.enabled == 'true' }}
+
       - name: Publish Rust crates
         if: steps.pending.outputs.publishing == 'true'
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN || steps.crates-auth.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
         run: bun run publish:crates
 
       # changesets does not rewrite the workspace: protocol here, so pin it to

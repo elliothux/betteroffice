@@ -1,23 +1,28 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
     ColorValue, GeometryPathCommand, GradientFill, LineEnd, ResolvedCellStyle, ShapeEffects,
-    ShapeFill, ShapeOutline, ShapeStyle, TableCellBorder, TableCellBorders as StyleCellBorders,
-    TableCellPosition, TableCellStyle, TableStyleFlags, Theme, ThemeFormatScheme,
-    normalize_table_column_widths, preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
+    ShapeFill, ShapeOutline, ShapeStyle, StyleReference, TableCellBorder,
+    TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyle,
+    TableStyleFlags, Theme, ThemeFormatScheme, normalize_table_column_widths,
+    preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
     resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
 };
 use ooxml_text::{
-    CompatFlags, FontId, FontStore, ShapeFeature, break_opportunities, shape, single_line_box,
+    CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
+    break_opportunities, shape, single_line_box, uppercase_for_language,
 };
-use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
+use pptx_edit::{
+    DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
+};
 use pptx_parse::{
-    BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath,
-    GraphicFrameData, LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill,
-    Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout,
-    SlideMaster, Table, TableCell, TextAutofit, TextBody, TextOverflow,
+    BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartPart, ChartSpace,
+    CustomGeometryPath, GraphicFrameData, LineSpacing, MediaPart, ParagraphProperties, Picture,
+    PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform,
+    Slide, SlideLayout, SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps,
+    TextOverflow, builtin_table_style, effective_color_map,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -31,6 +36,8 @@ use crate::{
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
+const EMU_PER_POINT: f64 = 12_700.0;
+const CSS_PIXELS_PER_POINT: f64 = 96.0 / 72.0;
 const PICTURE_FILL: &str = "picture";
 const LINE_END_MIN_BASE_PX: f32 = 0.7 / 25.4 * 96.0;
 const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
@@ -39,12 +46,13 @@ const DEFAULT_INSET_VERTICAL_EMU: i64 = 45_720;
 const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
 /// Size a super/subscript run shapes at, relative to its own `sz`.
 const SCRIPT_SIZE_RATIO: f32 = 0.58;
-const MIN_AUTOFIT_SCALE: f32 = 0.5;
-/// Compatibility line pitch in ems.
+/// `p:bgRef/@idx` counts `a:bgFillStyleLst` entries from here.
+const BACKGROUND_FILL_BASE: u32 = 1_001;
+/// Measured on PowerPoint 16.113 exports: 1.2 em for every face.
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
-const MAX_RENDER_SHAPES: usize = 20_000;
+pub(crate) const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
@@ -80,6 +88,8 @@ pub struct SlideRenderer {
     /// Normalized fallback family.
     fallback_family: Option<String>,
     font_count: usize,
+    /// Laid-out text reused across display-list builds and slides.
+    text_layouts: Mutex<TextLayoutCache>,
 }
 
 impl Default for SlideRenderer {
@@ -96,6 +106,7 @@ impl SlideRenderer {
             fallback: None,
             fallback_family: None,
             font_count: 0,
+            text_layouts: Mutex::new(TextLayoutCache::default()),
         }
     }
 
@@ -134,6 +145,9 @@ impl SlideRenderer {
         self.fallback_family
             .get_or_insert_with(|| normalize_family(family));
         self.font_count += 1;
+        if let Ok(cache) = self.text_layouts.get_mut() {
+            cache.clear();
+        }
         Ok(id.to_u32())
     }
 
@@ -158,6 +172,39 @@ impl SlideRenderer {
             .slides
             .get(slide_index)
             .ok_or(RenderError::SlideNotFound(slide_index))?;
+        self.layout_resolved(
+            package,
+            deck_slide,
+            deck.width_emu,
+            deck.height_emu,
+            slide_index,
+        )
+    }
+
+    /// Render one slide from a [`pptx_edit::DeckSession::slide_scope`] snapshot,
+    /// which materializes only that slide instead of the whole deck.
+    pub fn layout_scoped_slide(
+        &self,
+        package: &PptxPackage,
+        scope: &SlideScope,
+    ) -> Result<RenderedSlide, RenderError> {
+        self.layout_resolved(
+            package,
+            &scope.slide,
+            scope.width_emu,
+            scope.height_emu,
+            scope.index,
+        )
+    }
+
+    fn layout_resolved(
+        &self,
+        package: &PptxPackage,
+        deck_slide: &SlideSnapshot,
+        width_emu: i64,
+        height_emu: i64,
+        slide_index: usize,
+    ) -> Result<RenderedSlide, RenderError> {
         let parsed_slide = deck_slide
             .source_part_path
             .as_deref()
@@ -198,23 +245,66 @@ impl SlideRenderer {
             .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
             .or_else(|| package.themes.first());
         let default_theme = Theme::default();
-        let theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
+        let base_theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
+        // The slot mapping is per slide, not per theme part.
+        let color_map = effective_color_map(parsed_slide, layout, master);
+        let mapped_theme;
+        let theme = if color_map.is_identity() {
+            base_theme
+        } else {
+            mapped_theme = Theme {
+                color_map,
+                ..base_theme.clone()
+            };
+            &mapped_theme
+        };
         let default_format_scheme = ThemeFormatScheme::default();
         let format_scheme = theme_part
             .map(|part| &part.format_scheme)
             .unwrap_or(&default_format_scheme);
-        let background = parsed_slide
-            .and_then(|slide| slide.background.as_ref())
-            .or_else(|| layout.and_then(|layout| layout.background.as_ref()))
-            .or_else(|| master.and_then(|master| master.background.as_ref()))
+        let background_source = [
+            parsed_slide.map(BackgroundSource::from_slide),
+            layout.map(BackgroundSource::from_layout),
+            master.map(BackgroundSource::from_master),
+        ]
+        .into_iter()
+        .flatten()
+        .find(BackgroundSource::is_declared);
+        let background_fill =
+            background_source
+                .as_ref()
+                .and_then(|source| match source.reference {
+                    Some(reference) => Some(style_fill(format_scheme, reference, theme)),
+                    None => source.fill.cloned(),
+                });
+        let background_picture = background_source.as_ref().and_then(|source| {
+            source.picture.or_else(|| {
+                let index = source.reference?.index.checked_sub(BACKGROUND_FILL_BASE)?;
+                theme_part?
+                    .background_pictures
+                    .get(index as usize)?
+                    .as_ref()
+            })
+        });
+        // A referenced picture style carries no colour of its own, so keep the
+        // reference's own colour for the fills we cannot paint, such as a tile.
+        let background = background_fill
+            .as_ref()
             .and_then(|fill| paint(fill, theme))
+            .or_else(|| {
+                background_source
+                    .as_ref()
+                    .and_then(|source| source.fill)
+                    .and_then(|fill| paint(fill, theme))
+            })
+            .filter(|paint| !is_invisible(paint))
             .or_else(|| {
                 Some(Paint::Solid {
                     color: "#ffffff".to_owned(),
                 })
             });
-        let width = emu_to_px(deck.width_emu);
-        let height = emu_to_px(deck.height_emu);
+        let width = slide_extent_px(width_emu);
+        let height = slide_extent_px(height_emu);
         let mut builder = LayoutBuilder {
             renderer: self,
             package,
@@ -232,11 +322,36 @@ impl SlideRenderer {
             metafile_budget: MAX_METAFILE_PRIMITIVES,
             metafile_bytes: 32 * 1024 * 1024,
             metafiles: HashMap::new(),
+            media_parts: None,
+            chart_parts: None,
             slide_number: i64::from(package.presentation.first_slide_num) + slide_index as i64,
         };
         let root_space = Space::root();
-        let show_master = parsed_slide.is_none_or(|slide| slide.show_master_shapes)
-            && layout.is_none_or(|layout| layout.show_master_shapes);
+        if let Some(picture) = background_picture
+            && let Some(asset_id) = picture.media_part_path.clone()
+        {
+            builder.primitives.push(Primitive::Image {
+                geometry_fallback: false,
+                object_id: 0,
+                shape_id: None,
+                name: "Background".to_owned(),
+                x: 0.0,
+                y: 0.0,
+                w: width,
+                h: height,
+                asset_id: Some(asset_id),
+                effects: Vec::new(),
+                crop: picture_fill_crop(picture),
+                path: None,
+                stroke: None,
+                shadow: None,
+                transform: Transform::default(),
+            });
+        }
+        // `p:sld/@showMasterSp` hides the layout's own decoration as well as the
+        // master's, because the master reaches the slide through the layout.
+        let show_layout = parsed_slide.is_none_or(|slide| slide.show_master_shapes);
+        let show_master = show_layout && layout.is_none_or(|layout| layout.show_master_shapes);
         if show_master && let Some(master) = master {
             for (index, shape) in master.shapes.iter().enumerate() {
                 if node_placeholder(shape).is_none() {
@@ -248,7 +363,7 @@ impl SlideRenderer {
                 }
             }
         }
-        if let Some(layout) = layout {
+        if show_layout && let Some(layout) = layout {
             for (index, shape) in layout.shapes.iter().enumerate() {
                 if node_placeholder(shape).is_none() {
                     builder.render_parsed_shape(
@@ -324,6 +439,43 @@ pub enum HitTestResult {
     },
 }
 
+/// The first of slide, layout and master that declares `p:bg`.
+struct BackgroundSource<'a> {
+    fill: Option<&'a ShapeFill>,
+    picture: Option<&'a PictureFill>,
+    reference: Option<&'a StyleReference>,
+}
+
+impl<'a> BackgroundSource<'a> {
+    fn from_slide(slide: &'a Slide) -> Self {
+        Self {
+            fill: slide.background.as_ref(),
+            picture: slide.background_picture.as_deref(),
+            reference: slide.background_reference.as_ref(),
+        }
+    }
+
+    fn from_layout(layout: &'a SlideLayout) -> Self {
+        Self {
+            fill: layout.background.as_ref(),
+            picture: layout.background_picture.as_deref(),
+            reference: layout.background_reference.as_ref(),
+        }
+    }
+
+    fn from_master(master: &'a SlideMaster) -> Self {
+        Self {
+            fill: master.background.as_ref(),
+            picture: master.background_picture.as_deref(),
+            reference: master.background_reference.as_ref(),
+        }
+    }
+
+    fn is_declared(&self) -> bool {
+        self.fill.is_some() || self.picture.is_some() || self.reference.is_some()
+    }
+}
+
 pub struct RenderedSlide {
     pub display_list: SurfaceDisplayList,
     hit_regions: Vec<HitRegion>,
@@ -381,6 +533,11 @@ struct LayoutBuilder<'a> {
     metafile_budget: usize,
     metafile_bytes: usize,
     metafiles: HashMap<&'a str, Option<Arc<MetafileDrawing>>>,
+    /// Package media keyed by part path, built on first picture lookup so
+    /// per-shape work stays independent of the deck's part count.
+    media_parts: Option<HashMap<&'a str, &'a MediaPart>>,
+    /// Package charts keyed by (part path, theme part path); same rationale.
+    chart_parts: Option<HashMap<(&'a str, Option<&'a str>), &'a ChartPart>>,
     /// The number a `slidenum` field resolves to on this slide.
     slide_number: i64,
 }
@@ -523,6 +680,15 @@ impl<'a> LayoutBuilder<'a> {
         };
         match shape.kind {
             ShapeKind::Shape => {
+                let paths = custom_paths(original);
+                let (path, mut geometry_fallback) = geometry_path_with_fallback(
+                    &shape.geometry,
+                    &shape.adjust_values,
+                    f64::from(rect.w) / f64::from(rect.h),
+                );
+                if shape.geometry == "custom" && !paths.is_empty() {
+                    geometry_fallback = false;
+                }
                 self.push_shape(
                     Primitive::Shape {
                         clip: None,
@@ -535,11 +701,8 @@ impl<'a> LayoutBuilder<'a> {
                         w: rect.w,
                         h: rect.h,
                         geometry: shape.geometry.clone(),
-                        path: geometry_path(
-                            &shape.geometry,
-                            &shape.adjust_values,
-                            f64::from(rect.w) / f64::from(rect.h),
-                        ),
+                        path,
+                        geometry_fallback,
                         adjust_values: shape
                             .adjust_values
                             .iter()
@@ -550,22 +713,25 @@ impl<'a> LayoutBuilder<'a> {
                         shadow,
                         transform,
                     },
-                    custom_paths(original),
+                    paths,
                     picture,
                 )?;
             }
             ShapeKind::Picture => {
                 let source = picture_source(original);
+                let asset_id = picture_asset_id(shape);
                 self.render_picture(
                     shape.source_id,
                     &stable_id,
                     &shape.name,
                     rect,
                     transform,
-                    shape.media_part_path.as_deref(),
+                    asset_id.as_deref(),
                     &shape.blip_effects,
                     source.map(|picture| &picture.crop),
-                    source.and_then(|picture| picture_mask(picture, rect)),
+                    source
+                        .map(|picture| picture_mask(picture, rect))
+                        .unwrap_or_default(),
                     outline,
                     shadow,
                 );
@@ -673,6 +839,14 @@ impl<'a> LayoutBuilder<'a> {
                             transform.flip_v,
                         )
                     });
+                let (path, mut geometry_fallback) = geometry_path_with_fallback(
+                    &value.geometry,
+                    &value.adjust_values,
+                    f64::from(rect.w) / f64::from(rect.h),
+                );
+                if value.geometry == "custom" && !value.paths.is_empty() {
+                    geometry_fallback = false;
+                }
                 self.push_shape(
                     Primitive::Shape {
                         clip: None,
@@ -685,11 +859,8 @@ impl<'a> LayoutBuilder<'a> {
                         w: rect.w,
                         h: rect.h,
                         geometry: value.geometry.clone(),
-                        path: geometry_path(
-                            &value.geometry,
-                            &value.adjust_values,
-                            f64::from(rect.w) / f64::from(rect.h),
-                        ),
+                        path,
+                        geometry_fallback,
                         adjust_values: value
                             .adjust_values
                             .iter()
@@ -787,7 +958,7 @@ impl<'a> LayoutBuilder<'a> {
         media_part_path: Option<&str>,
         effects: &[BlipEffect],
         crop: Option<&PictureCrop>,
-        mask: Option<Vec<GeometryPathCommand>>,
+        mask: PictureMask,
         outline: Option<Stroke>,
         shadow: Option<Shadow>,
     ) {
@@ -799,7 +970,7 @@ impl<'a> LayoutBuilder<'a> {
                 transform,
                 media_part_path,
                 crop,
-                mask.as_deref(),
+                &mask,
             )
         {
             if let Some(outline) = outline {
@@ -815,8 +986,10 @@ impl<'a> LayoutBuilder<'a> {
                     h: rect.h,
                     geometry: "rect".to_owned(),
                     path: mask
+                        .path
                         .clone()
                         .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0)),
+                    geometry_fallback: mask.geometry_fallback,
                     adjust_values: BTreeMap::new(),
                     fill: None,
                     stroke: Some(outline),
@@ -837,7 +1010,8 @@ impl<'a> LayoutBuilder<'a> {
             asset_id: media_part_path.map(str::to_owned),
             effects: image_effects(effects, self.theme),
             crop: crop.map(image_crop).unwrap_or_default(),
-            path: mask,
+            path: mask.path,
+            geometry_fallback: mask.geometry_fallback,
             stroke: outline,
             shadow,
             transform,
@@ -853,7 +1027,7 @@ impl<'a> LayoutBuilder<'a> {
         transform: Transform,
         media_part_path: Option<&str>,
         crop: Option<&PictureCrop>,
-        mask: Option<&[GeometryPathCommand]>,
+        mask: &PictureMask,
     ) -> bool {
         if self.metafile_budget == 0 {
             return false;
@@ -868,13 +1042,30 @@ impl<'a> LayoutBuilder<'a> {
         let Some(crop) = source_rect(crop) else {
             return true;
         };
+        let masked = mask.path.is_some();
         let clip = mask
-            .map(<[_]>::to_vec)
+            .path
+            .clone()
             .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0));
         for mut op in drawing.ops.iter().cloned() {
             place_in_source_rect(&mut op.path, crop);
+            // one clip per primitive, so a picture mask and the metafile's own
+            // clip cannot both be carried: draw under the mask only where the
+            // metafile clip would remove nothing, and drop the op otherwise
+            // rather than paint what either region hides.
+            let op_clip = match (op.clip, masked) {
+                (Some(rect), false) => match metafile_clip_path(rect, crop) {
+                    Some(path) => path,
+                    None => continue,
+                },
+                (Some(rect), true) => match clipped_away(&op.path, rect, crop) {
+                    true => continue,
+                    false => clip.clone(),
+                },
+                (None, _) => clip.clone(),
+            };
             self.primitives.push(Primitive::Shape {
-                clip: Some(clip.clone()),
+                clip: Some(op_clip),
                 even_odd: op.even_odd,
                 object_id,
                 shape_id: None,
@@ -885,9 +1076,11 @@ impl<'a> LayoutBuilder<'a> {
                 h: rect.h,
                 geometry: "custom".to_owned(),
                 path: op.path,
+                geometry_fallback: mask.geometry_fallback,
                 adjust_values: BTreeMap::new(),
                 fill: op.fill.map(|color| Paint::Solid { color }),
                 stroke: op.stroke.map(|stroke| Stroke {
+                    join: None,
                     color: stroke.color,
                     paint: None,
                     width: ((stroke.width * crop.2 * f64::from(rect.w)) as f32).max(1.0),
@@ -902,25 +1095,33 @@ impl<'a> LayoutBuilder<'a> {
         true
     }
 
+    fn media_part(&mut self, part_path: &str) -> Option<&'a MediaPart> {
+        self.media_parts
+            .get_or_insert_with(|| {
+                let mut index = HashMap::new();
+                for part in &self.package.media {
+                    index.entry(part.part_path.as_str()).or_insert(part);
+                }
+                index
+            })
+            .get(part_path)
+            .copied()
+    }
+
     fn metafile(&mut self, media_part_path: Option<&str>) -> Option<Arc<MetafileDrawing>> {
         let part_path = media_part_path?;
-        let part = self
-            .package
-            .media
-            .iter()
-            .find(|part| part.part_path == part_path)?;
-        if !is_metafile(&part.bytes) {
-            return None;
-        }
         if let Some(drawing) = self.metafiles.get(part_path) {
             return drawing.clone();
         }
-        if part.bytes.len() > self.metafile_bytes {
+        let part = self.media_part(part_path)?;
+        if !is_metafile(&part.bytes) || part.bytes.len() > self.metafile_bytes {
+            self.metafiles.insert(part.part_path.as_str(), None);
             return None;
         }
         self.metafile_bytes -= part.bytes.len();
         let drawing = decode_metafile(&part.bytes).map(Arc::new);
-        self.metafiles.insert(&part.part_path, drawing.clone());
+        self.metafiles
+            .insert(part.part_path.as_str(), drawing.clone());
         drawing
     }
 
@@ -933,7 +1134,16 @@ impl<'a> LayoutBuilder<'a> {
         if paths.is_empty()
             || !matches!(&primitive, Primitive::Shape { geometry, .. } if geometry == "custom")
         {
-            self.primitives.push(picture_filled(primitive, picture));
+            for (index, (primitive, has_fill)) in crate::geometry::preset_primitives(primitive)
+                .into_iter()
+                .enumerate()
+            {
+                if index > 0 {
+                    self.charge_shape()?;
+                }
+                let picture = picture.filter(|_| has_fill);
+                self.primitives.push(picture_filled(primitive, picture));
+            }
             return Ok(());
         }
         for (index, custom) in paths.iter().enumerate() {
@@ -1092,6 +1302,13 @@ impl<'a> LayoutBuilder<'a> {
             last_column: table.properties.last_col,
             band_row: table.properties.band_row,
         };
+        let package = self.package;
+        let table_style = table.properties.style_id.as_deref().and_then(|id| {
+            package
+                .table_styles
+                .style(Some(id))
+                .or_else(|| builtin_table_style(id))
+        });
         let mut heights: Vec<f32> = table.rows.iter().map(|row| emu_to_px(row.height)).collect();
         let mut spans = Vec::new();
         let mut plans = Vec::new();
@@ -1118,27 +1335,24 @@ impl<'a> LayoutBuilder<'a> {
                         self.slide_number,
                     ),
                 };
-                let style_id = table.properties.style_id.as_deref();
                 let position = TableCellPosition {
                     row: row_index,
                     column,
                     row_count,
                     column_count,
                 };
-                let mut style = self
-                    .package
-                    .table_styles
-                    .resolve_cell(style_id, flags, position);
+                let resolve = |position| {
+                    table_style
+                        .map(|style: &TableStyle| style.resolve_cell(flags, position))
+                        .unwrap_or_default()
+                };
+                let mut style = resolve(position);
                 if span > 1 || row_span > 1 {
-                    let far = self.package.table_styles.resolve_cell(
-                        style_id,
-                        flags,
-                        TableCellPosition {
-                            row: row_index + row_span - 1,
-                            column: column + span - 1,
-                            ..position
-                        },
-                    );
+                    let far = resolve(TableCellPosition {
+                        row: row_index + row_span - 1,
+                        column: column + span - 1,
+                        ..position
+                    });
                     style.right = far.right;
                     style.bottom = far.bottom;
                 }
@@ -1265,11 +1479,11 @@ impl<'a> LayoutBuilder<'a> {
             w: (width - emu_to_px(left + right)).max(1.0),
             h: 0.0,
         };
-        let text = layout_content(&self.renderer.fonts, &resolved, rect, 1.0, false)?;
+        let text = self.layout_text(&resolved, rect, 1.0, false)?;
         Ok(text.total_height + emu_to_px(top + bottom))
     }
 
-    fn chart_space(&self, graphic: Option<&GraphicFrameData>) -> Option<&'a ChartSpace> {
+    fn chart_space(&mut self, graphic: Option<&GraphicFrameData>) -> Option<&'a ChartSpace> {
         let GraphicFrameData::Chart {
             part_path: Some(part_path),
             ..
@@ -1277,13 +1491,18 @@ impl<'a> LayoutBuilder<'a> {
         else {
             return None;
         };
-        self.package
-            .charts
-            .iter()
-            .find(|part| {
-                &part.part_path == part_path
-                    && part.theme_part_path.as_deref() == self.theme_part_path
+        let theme_part_path = self.theme_part_path;
+        self.chart_parts
+            .get_or_insert_with(|| {
+                let mut index = HashMap::new();
+                for part in &self.package.charts {
+                    index
+                        .entry((part.part_path.as_str(), part.theme_part_path.as_deref()))
+                        .or_insert(part);
+                }
+                index
             })
+            .get(&(part_path.as_str(), theme_part_path))
             .map(|part| &part.chart)
     }
 
@@ -1313,36 +1532,9 @@ impl<'a> LayoutBuilder<'a> {
             w: (text_rect.w - emu_to_px(left + right)).max(1.0),
             h: (text_rect.h - emu_to_px(top + bottom)).max(1.0),
         };
-        let autofit = cascade.autofit();
-        let mut scale = match autofit {
-            Some(TextAutofit::Normal { font_scale, .. }) => {
-                font_scale.unwrap_or(1.0).clamp(0.1, 1.0) as f32
-            }
-            _ => 1.0,
-        };
+        let scale = autofit_font_scale(cascade.autofit());
         let stacked = flow == TextFlow::Stacked;
-        let mut laid_out = layout_content(
-            &self.renderer.fonts,
-            &resolved,
-            content_rect,
-            scale,
-            stacked,
-        )?;
-        if !stacked && matches!(autofit, Some(TextAutofit::Normal { .. })) {
-            while laid_out.total_height > content_rect.h && scale > MIN_AUTOFIT_SCALE {
-                scale = (scale * 0.9).max(MIN_AUTOFIT_SCALE);
-                laid_out = layout_content(
-                    &self.renderer.fonts,
-                    &resolved,
-                    content_rect,
-                    scale,
-                    stacked,
-                )?;
-                if scale == MIN_AUTOFIT_SCALE {
-                    break;
-                }
-            }
-        }
+        let mut laid_out = self.layout_text(&resolved, content_rect, scale, stacked)?;
         self.line_count += laid_out.lines.len();
         if self.line_count > MAX_TEXT_LINES {
             return Err(RenderError::ResourceLimit(format!(
@@ -1416,6 +1608,31 @@ impl<'a> LayoutBuilder<'a> {
             transform: text_transform,
             lines,
         })
+    }
+
+    /// `layout_content` behind the renderer cache.
+    fn layout_text(
+        &self,
+        content: &ResolvedContent,
+        rect: PxRect,
+        scale: f32,
+        stacked: bool,
+    ) -> Result<LayoutText, RenderError> {
+        let key = text_layout_key(content, rect, scale, stacked);
+        if let Some(text) = self
+            .renderer
+            .text_layouts
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key))
+        {
+            return Ok(text);
+        }
+        let laid_out = layout_content(&self.renderer.fonts, content, rect, scale, stacked)?;
+        if let Ok(mut cache) = self.renderer.text_layouts.lock() {
+            cache.insert(key, &laid_out);
+        }
+        Ok(laid_out)
     }
 }
 
@@ -1532,6 +1749,7 @@ fn cell_fill(object_id: u32, rect: PxRect, fill: Paint) -> Primitive {
             &BTreeMap::new(),
             f64::from(rect.w) / f64::from(rect.h),
         ),
+        geometry_fallback: false,
         adjust_values: BTreeMap::new(),
         fill: Some(fill),
         stroke: None,
@@ -1556,6 +1774,7 @@ fn cell_border(object_id: u32, from: (f32, f32), to: (f32, f32), stroke: Stroke)
             GeometryPathCommand::Move { x: 0.0, y: 0.0 },
             GeometryPathCommand::Line { x: 1.0, y: 1.0 },
         ],
+        geometry_fallback: false,
         adjust_values: BTreeMap::new(),
         fill: None,
         stroke: Some(stroke),
@@ -1690,13 +1909,6 @@ impl BodyCascade<'_> {
             .or_else(|| self.master.and_then(|body| body.autofit.as_ref()))
     }
 
-    fn compat_line_spacing(&self) -> bool {
-        cascade_value(self.primary, self.layout, self.master, |body| {
-            body.compat_line_spacing
-        })
-        .unwrap_or(false)
-    }
-
     fn inset_left(&self) -> Option<i64> {
         cascade_value(self.primary, self.layout, self.master, |body| {
             body.inset_left
@@ -1719,6 +1931,19 @@ impl BodyCascade<'_> {
         cascade_value(self.primary, self.layout, self.master, |body| {
             body.inset_bottom
         })
+    }
+
+    /// `a:endParaRPr`: what PowerPoint sizes a paragraph by when it carries no
+    /// runs of its own.
+    fn end_run_properties(&self, index: usize) -> Option<&RunProperties> {
+        [self.primary, self.layout, self.master]
+            .into_iter()
+            .flatten()
+            .find_map(|body| {
+                body.paragraphs
+                    .get(index)
+                    .and_then(|paragraph| paragraph.end_properties.as_ref())
+            })
     }
 
     fn paragraph_properties(&self, index: usize, level: u32) -> ParagraphProperties {
@@ -1875,8 +2100,12 @@ struct ResolvedParagraph {
     line_spacing: Option<LineSpacing>,
     space_before: Option<LineSpacing>,
     space_after: Option<LineSpacing>,
-    compat_line_spacing: bool,
+    line_space_reduction: f32,
     indent_px: f32,
+    /// `a:tabLst` stops in pixels from the text area's left edge, ascending.
+    tab_stops: Vec<f32>,
+    /// Pitch of the implicit stops past the last declared one.
+    default_tab_px: f32,
     marker: Option<String>,
     bullet_style: Option<ResolvedStyle>,
     runs: Vec<ResolvedRun>,
@@ -1893,6 +2122,9 @@ struct ResolvedStyle {
     face: FontFace,
     family: String,
     font_size_pt: f32,
+    /// Size the line box and percentage line spacing read. Small caps shape
+    /// smaller than the run was authored at without shortening its line.
+    line_font_size_pt: f32,
     /// `spc`: tracking added after every cluster, in points.
     spacing_pt: f32,
     baseline_shift_px: f32,
@@ -1900,6 +2132,7 @@ struct ResolvedStyle {
     italic: bool,
     underline: bool,
     color: String,
+    caps: TextCaps,
 }
 
 fn resolve_content(
@@ -1934,10 +2167,10 @@ fn resolve_content(
             "more than {MAX_TEXT_RUNS} text runs"
         )));
     }
-    let compat_line_spacing = cascade.compat_line_spacing();
+    let line_space_reduction = autofit_line_space_reduction(cascade.autofit());
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
-    let mut counters = [0_u32; 9];
+    let mut numbering = AutoNumbering::default();
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
         let mut properties = cascade.paragraph_properties(index, paragraph.level);
         if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
@@ -1949,35 +2182,35 @@ fn resolve_content(
                 *restart |= *start_at != 1;
             }
         }
+        let language = properties
+            .default_run
+            .as_ref()
+            .and_then(|value| value.language.as_deref());
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
         for run in &paragraph.runs {
             let style =
                 resolve_style(renderer, theme, &run.style, properties.default_run.as_ref())?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
-            runs.push(ResolvedRun {
-                text: run.text.clone(),
-                start,
-                style,
-            });
+            push_cased_runs(&mut runs, &run.text, start, language, style);
         }
         if runs.is_empty() {
+            let end_style = cascade
+                .end_run_properties(index)
+                .map(|end| style_from_properties(end, theme))
+                .unwrap_or_default();
             runs.push(ResolvedRun {
                 text: String::new(),
                 start: story_offset,
-                style: resolve_style(
-                    renderer,
-                    theme,
-                    &TextStyle::default(),
-                    properties.default_run.as_ref(),
-                )?,
+                style: resolve_style(renderer, theme, &end_style, properties.default_run.as_ref())?,
             });
         }
         let alignment = paragraph
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut counters);
+        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering)
+            .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
@@ -1987,8 +2220,14 @@ fn resolve_content(
             line_spacing: properties.line_spacing,
             space_before: properties.space_before,
             space_after: properties.space_after,
-            compat_line_spacing,
+            line_space_reduction,
             indent_px: emu_to_px(properties.indent.unwrap_or_default()),
+            tab_stops: resolve_tab_stops(
+                properties.tab_stops.as_deref(),
+                properties.margin_left.unwrap_or_default(),
+                properties.indent.unwrap_or_default(),
+            ),
+            default_tab_px: resolve_default_tab(properties.default_tab_size),
             bullet_style: marker
                 .is_some()
                 .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
@@ -1999,6 +2238,88 @@ fn resolve_content(
         story_offset = story_offset.saturating_add(1);
     }
     Ok(ResolvedContent { paragraphs })
+}
+
+/// Cases one run for drawing. `a:rPr/@cap` is a display property: the stored
+/// run text keeps the author's casing, so only the runs handed to the shaper
+/// change and the save projection is untouched.
+fn push_cased_runs(
+    out: &mut Vec<ResolvedRun>,
+    text: &str,
+    start: u32,
+    language: Option<&str>,
+    style: ResolvedStyle,
+) {
+    if text.is_empty() || style.caps == TextCaps::None {
+        out.push(ResolvedRun {
+            text: text.to_owned(),
+            start,
+            style,
+        });
+        return;
+    }
+    if style.caps == TextCaps::All {
+        out.push(ResolvedRun {
+            text: display_uppercase(text, language),
+            start,
+            style,
+        });
+        return;
+    }
+    let mut small = style.clone();
+    small.font_size_pt = style.font_size_pt * WORD_SMALL_CAPS_ADVANCE_SCALE;
+    let mut offset = start;
+    for (lowercase, segment) in case_segments(text) {
+        let cased = display_uppercase(segment, language);
+        let length = utf16_len(&cased);
+        out.push(ResolvedRun {
+            text: cased,
+            start: offset,
+            style: if lowercase {
+                small.clone()
+            } else {
+                style.clone()
+            },
+        });
+        offset = offset.saturating_add(length);
+    }
+}
+
+/// Uppercases for drawing only, keeping every character's UTF-16 width so the
+/// display list still reports the authored story offsets. A character whose
+/// uppercase form is wider (ß → SS) stays as authored.
+fn display_uppercase(text: &str, language: Option<&str>) -> String {
+    text.chars()
+        .map(|character| {
+            let mut upper = uppercase_for_language(character, language).into_iter();
+            match (upper.next(), upper.next()) {
+                (Some(single), None) if single.len_utf16() == character.len_utf16() => single,
+                _ => character,
+            }
+        })
+        .collect()
+}
+
+/// Splits `text` where its characters stop being lowercase, so small caps can
+/// draw the lowercase stretches at a reduced size.
+fn case_segments(text: &str) -> Vec<(bool, &str)> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut current = None;
+    for (index, character) in text.char_indices() {
+        let lowercase = character.is_lowercase();
+        if current != Some(lowercase) {
+            if let Some(previous) = current {
+                segments.push((previous, &text[start..index]));
+            }
+            start = index;
+            current = Some(lowercase);
+        }
+    }
+    if let Some(previous) = current {
+        segments.push((previous, &text[start..]));
+    }
+    segments
 }
 
 fn resolve_bullet_style(
@@ -2104,6 +2425,7 @@ fn resolve_style(
         family: face.family.clone(),
         face,
         font_size_pt,
+        line_font_size_pt: font_size_pt,
         spacing_pt,
         baseline_shift_px,
         bold,
@@ -2114,6 +2436,10 @@ fn resolve_style(
             .or_else(|| fallback.and_then(|value| value.underline.as_deref()))
             .is_some_and(|value| value != "none"),
         color,
+        caps: direct
+            .caps
+            .or_else(|| fallback.and_then(|value| value.caps))
+            .unwrap_or(TextCaps::None),
     })
 }
 
@@ -2262,6 +2588,186 @@ struct LayoutText {
     total_height: f32,
 }
 
+/// Byte cap on retained text layouts; oldest entry evicts first.
+const MAX_TEXT_LAYOUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Laid-out text keyed by every `layout_content` input.
+#[derive(Default)]
+struct TextLayoutCache {
+    entries: HashMap<Vec<u8>, CachedTextLayout>,
+    order: VecDeque<Vec<u8>>,
+    bytes: usize,
+}
+
+struct CachedTextLayout {
+    lines: Vec<PositionedTextLine>,
+    total_height: f32,
+    bytes: usize,
+}
+
+impl TextLayoutCache {
+    fn get(&self, key: &[u8]) -> Option<LayoutText> {
+        self.entries.get(key).map(|entry| LayoutText {
+            lines: entry.lines.clone(),
+            total_height: entry.total_height,
+        })
+    }
+
+    fn insert(&mut self, key: Vec<u8>, text: &LayoutText) {
+        let bytes = key.len() * 2 + text_layout_bytes(&text.lines);
+        if bytes > MAX_TEXT_LAYOUT_BYTES || self.entries.contains_key(&key) {
+            return;
+        }
+        self.bytes += bytes;
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            CachedTextLayout {
+                lines: text.lines.clone(),
+                total_height: text.total_height,
+                bytes,
+            },
+        );
+        while self.bytes > MAX_TEXT_LAYOUT_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.bytes -= entry.bytes;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+}
+
+fn text_layout_bytes(lines: &[PositionedTextLine]) -> usize {
+    lines
+        .iter()
+        .map(|line| {
+            size_of::<PositionedTextLine>()
+                + line.caret_stops.capacity() * size_of::<CaretStop>()
+                + line
+                    .runs
+                    .iter()
+                    .map(|run| {
+                        size_of::<PositionedTextRun>()
+                            + run.text.capacity()
+                            + run.font_family.capacity()
+                            + run.color.capacity()
+                            + run.glyphs.capacity() * size_of::<PositionedGlyph>()
+                    })
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
+/// Encodes every argument `layout_content` reads.
+fn text_layout_key(content: &ResolvedContent, rect: PxRect, scale: f32, stacked: bool) -> Vec<u8> {
+    let text_len: usize = content
+        .paragraphs
+        .iter()
+        .flat_map(|paragraph| &paragraph.runs)
+        .map(|run| run.text.len())
+        .sum();
+    let mut key = Vec::with_capacity(64 + text_len);
+    key_f32(&mut key, rect.x);
+    key_f32(&mut key, rect.y);
+    key_f32(&mut key, rect.w);
+    key_f32(&mut key, scale);
+    key.push(u8::from(stacked));
+    key_u32(&mut key, content.paragraphs.len() as u32);
+    for paragraph in &content.paragraphs {
+        key.push(match paragraph.align {
+            TextAlign::Left => 0,
+            TextAlign::Center => 1,
+            TextAlign::Right => 2,
+            TextAlign::Justify => 3,
+        });
+        key.push(u8::from(paragraph.justify));
+        key_u32(&mut key, paragraph.level);
+        key_f32(&mut key, paragraph.margin_left_px);
+        key_f32(&mut key, paragraph.margin_right_px);
+        key_f32(&mut key, paragraph.indent_px);
+        key_f32(&mut key, paragraph.line_space_reduction);
+        key_spacing(&mut key, &paragraph.line_spacing);
+        key_spacing(&mut key, &paragraph.space_before);
+        key_spacing(&mut key, &paragraph.space_after);
+        key_opt_str(&mut key, &paragraph.marker);
+        match &paragraph.bullet_style {
+            Some(style) => {
+                key.push(1);
+                key_style(&mut key, style);
+            }
+            None => key.push(0),
+        }
+        key_u32(&mut key, paragraph.runs.len() as u32);
+        for run in &paragraph.runs {
+            key_u32(&mut key, run.start);
+            key_str(&mut key, &run.text);
+            key_style(&mut key, &run.style);
+        }
+    }
+    key
+}
+
+fn key_u32(key: &mut Vec<u8>, value: u32) {
+    key.extend_from_slice(&value.to_le_bytes());
+}
+
+fn key_f32(key: &mut Vec<u8>, value: f32) {
+    key_u32(key, value.to_bits());
+}
+
+fn key_f64(key: &mut Vec<u8>, value: f64) {
+    key.extend_from_slice(&value.to_bits().to_le_bytes());
+}
+
+fn key_str(key: &mut Vec<u8>, value: &str) {
+    key_u32(key, value.len() as u32);
+    key.extend_from_slice(value.as_bytes());
+}
+
+fn key_opt_str(key: &mut Vec<u8>, value: &Option<String>) {
+    match value {
+        Some(value) => {
+            key.push(1);
+            key_str(key, value);
+        }
+        None => key.push(0),
+    }
+}
+
+fn key_spacing(key: &mut Vec<u8>, spacing: &Option<LineSpacing>) {
+    match spacing {
+        Some(LineSpacing::Percent { value }) => {
+            key.push(1);
+            key_f64(key, *value);
+        }
+        Some(LineSpacing::Points { value }) => {
+            key.push(2);
+            key_f64(key, *value);
+        }
+        None => key.push(0),
+    }
+}
+
+fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
+    key_u32(key, style.face.id.to_u32());
+    key_str(key, &style.family);
+    key_f32(key, style.font_size_pt);
+    key_f32(key, style.spacing_pt);
+    key_f32(key, style.baseline_shift_px);
+    key.push(u8::from(style.bold));
+    key.push(u8::from(style.italic));
+    key.push(u8::from(style.underline));
+    key_str(key, &style.color);
+}
+
 fn layout_content(
     fonts: &FontStore,
     content: &ResolvedContent,
@@ -2302,7 +2808,7 @@ fn layout_content(
     })
 }
 
-/// Height of a `spcBef` or `spcAft`, whose percentages measure the text size.
+/// Height of a `spcBef` or `spcAft`, whose percentages measure a single line.
 fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale: f32) -> f32 {
     let height = match spacing {
         Some(LineSpacing::Percent { value }) => {
@@ -2311,7 +2817,7 @@ fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale
                 .iter()
                 .map(|run| run.style.font_size_pt)
                 .fold(0.0_f32, f32::max);
-            value as f32 * points_to_px(size_pt * scale)
+            value as f32 * SINGLE_LINE_PITCH_EM * points_to_px(size_pt * scale)
         }
         Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
         None => 0.0,
@@ -2323,6 +2829,81 @@ fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale
     }
 }
 
+/// `a:pPr/@defTabSz` when the cascade declares none: one inch.
+const DEFAULT_TAB_EMU: i64 = 914_400;
+
+/// Pitch of the implicit tab stops, in pixels.
+fn resolve_default_tab(size: Option<i64>) -> f32 {
+    let pitch = emu_to_px(size.unwrap_or(DEFAULT_TAB_EMU));
+    if pitch.is_finite() && pitch >= 1.0 {
+        pitch
+    } else {
+        emu_to_px(DEFAULT_TAB_EMU)
+    }
+}
+
+/// Declared stops in pixels, ascending, plus the implicit stop a hanging indent
+/// puts at the paragraph's left margin — the one a leading tab lands on.
+fn resolve_tab_stops(stops: Option<&[i64]>, margin_left: i64, indent: i64) -> Vec<f32> {
+    let mut resolved = stops
+        .unwrap_or_default()
+        .iter()
+        .map(|position| emu_to_px(*position))
+        .filter(|position| position.is_finite() && *position > 0.0)
+        .collect::<Vec<_>>();
+    if indent < 0 {
+        let hanging = emu_to_px(margin_left);
+        if hanging.is_finite() && hanging > 0.0 {
+            resolved.push(hanging);
+        }
+    }
+    resolved.sort_by(f32::total_cmp);
+    resolved.dedup();
+    resolved
+}
+
+/// How far left of the margin PowerPoint starts the paragraph's first line. A
+/// marker owns that space here, so only an unmarked hanging indent has any, and
+/// only the first tab of the first line is measured against it.
+fn hanging_space(paragraph: &ResolvedParagraph) -> f32 {
+    if paragraph.marker.is_some() || !paragraph.indent_px.is_finite() {
+        return 0.0;
+    }
+    (-paragraph.indent_px).clamp(0.0, paragraph.margin_left_px.max(0.0))
+}
+
+/// A stop the pen already sits on does not hold the tab.
+const TAB_EPSILON_PX: f32 = 0.01;
+
+/// Width one tab takes. The stop is chosen from `offset` — where PowerPoint's
+/// pen would be — and the width is measured from `pen`, where ours is; the two
+/// differ only for the tab that stands in a hanging indent. The first declared
+/// stop past `offset` wins, otherwise the next multiple of the default pitch,
+/// and a tab never moves backwards or reaches past the line.
+fn tab_advance(offset: f32, pen: f32, stops: &[f32], default_px: f32, limit: f32) -> f32 {
+    let limit = if limit.is_finite() {
+        limit.max(0.0)
+    } else {
+        0.0
+    };
+    if !offset.is_finite() || !pen.is_finite() {
+        return 0.0;
+    }
+    let next = stops
+        .iter()
+        .copied()
+        .find(|stop| *stop > offset + TAB_EPSILON_PX)
+        .unwrap_or_else(|| {
+            let steps = (offset / default_px).floor() + 1.0;
+            if steps.is_finite() {
+                steps * default_px
+            } else {
+                offset + default_px
+            }
+        });
+    (next - pen).clamp(0.0, limit)
+}
+
 fn layout_paragraph(
     fonts: &FontStore,
     paragraph: &ResolvedParagraph,
@@ -2332,7 +2913,7 @@ fn layout_paragraph(
     scale: f32,
     stacked: bool,
 ) -> Result<Vec<PositionedTextLine>, RenderError> {
-    let clusters = shape_paragraph(fonts, paragraph, scale)?;
+    let mut clusters = shape_paragraph(fonts, paragraph, scale)?;
     if clusters.is_empty() {
         let style = &paragraph.runs[0].style;
         let line_box = spaced_line_box(
@@ -2363,7 +2944,14 @@ fn layout_paragraph(
             .map(|index| (index, index + 1))
             .collect()
     } else {
-        wrap_clusters(&clusters, width)
+        wrap_clusters(
+            &mut clusters,
+            width,
+            paragraph.margin_left_px.max(0.0),
+            hanging_space(paragraph),
+            &paragraph.tab_stops,
+            paragraph.default_tab_px,
+        )
     };
     let line_count = ranges.len();
     let mut output = Vec::with_capacity(line_count);
@@ -2407,11 +2995,10 @@ fn layout_paragraph(
             TextAlign::Right => x + (width - natural_width).max(0.0),
             TextAlign::Left | TextAlign::Justify => x,
         };
-        let line_box = spaced_line_box(
-            clusters_line_box(fonts, slice, scale)?,
-            paragraph,
-            line_font_size_px(slice, scale),
-            scale,
+        let (natural, extents) = clusters_line_box(fonts, slice, scale)?;
+        let line_box = shifted_line_box(
+            spaced_line_box(natural, paragraph, line_font_size_px(slice, scale), scale),
+            extents,
         );
         let mut caret_stops = vec![CaretStop {
             position: slice[0].start,
@@ -2476,8 +3063,10 @@ fn prepend_bullet(
         line_spacing: None,
         space_before: None,
         space_after: None,
-        compat_line_spacing: false,
+        line_space_reduction: 0.0,
         indent_px: 0.0,
+        tab_stops: Vec::new(),
+        default_tab_px: resolve_default_tab(None),
         marker: None,
         bullet_style: None,
         runs: vec![ResolvedRun {
@@ -2520,6 +3109,8 @@ struct ShapedCluster {
     glyphs: Vec<ClusterGlyph>,
     break_after: bool,
     mandatory: bool,
+    /// A `U+0009` cluster, whose width the tab stops decide per line.
+    tab: bool,
 }
 
 struct ClusterGlyph {
@@ -2550,7 +3141,7 @@ fn shape_paragraph(
     for (run_index, run) in paragraph.runs.iter().enumerate() {
         let mut segment_start = 0_usize;
         for (byte_index, character) in run.text.char_indices() {
-            if character != '\n' {
+            if character != '\n' && character != '\t' {
                 continue;
             }
             add_shaped_segment(
@@ -2567,8 +3158,9 @@ fn shape_paragraph(
                 &mut clusters,
             )?;
             let start = run.start + utf16_len(&run.text[..byte_index]);
+            let hard = character == '\n';
             clusters.push(ShapedCluster {
-                text: "\n".to_owned(),
+                text: character.to_string(),
                 start,
                 end: start + 1,
                 width: 0.0,
@@ -2577,7 +3169,8 @@ fn shape_paragraph(
                 style: run.style.clone(),
                 glyphs: Vec::new(),
                 break_after: true,
-                mandatory: true,
+                mandatory: hard,
+                tab: !hard,
             });
             segment_start = byte_index + character.len_utf8();
         }
@@ -2683,6 +3276,7 @@ fn add_shaped_segment(
             glyphs,
             break_after: breaks.contains_key(&global_end),
             mandatory: breaks.get(&global_end).copied().unwrap_or(false),
+            tab: false,
         });
     }
     Ok(())
@@ -2701,15 +3295,38 @@ fn trailing_tracking(clusters: &[ShapedCluster]) -> f32 {
         .map_or(0.0, |cluster| cluster.tracking)
 }
 
-fn wrap_clusters(clusters: &[ShapedCluster], width: f32) -> Vec<(usize, usize)> {
+/// Greedy line fill. Tab clusters take their width here, from the pen's offset
+/// in the text area, so the wrap and the painted line agree on where a tab
+/// lands: the greedy walk reaches a cluster in its final line's position last.
+fn wrap_clusters(
+    clusters: &mut [ShapedCluster],
+    width: f32,
+    left_offset: f32,
+    hanging: f32,
+    stops: &[f32],
+    default_tab_px: f32,
+) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut start = 0;
+    let mut line_index = 0;
     while start < clusters.len() {
         let mut cursor = start;
         let mut line_width = 0.0;
+        let mut tabs_taken = 0_usize;
         let mut last_break = None;
         let mut end = clusters.len();
         while cursor < clusters.len() {
+            if clusters[cursor].tab {
+                let pen = left_offset + line_width;
+                let measured = if line_index == 0 && tabs_taken == 0 {
+                    pen - hanging
+                } else {
+                    pen
+                };
+                clusters[cursor].width =
+                    tab_advance(measured, pen, stops, default_tab_px, width - line_width);
+                tabs_taken += 1;
+            }
             let cluster = &clusters[cursor];
             if cluster.text != "\n"
                 && line_width + cluster.width - cluster.tracking > width
@@ -2738,6 +3355,7 @@ fn wrap_clusters(clusters: &[ShapedCluster], width: f32) -> Vec<(usize, usize)> 
         }
         ranges.push((start, end));
         start = end;
+        line_index += 1;
     }
     ranges
 }
@@ -2889,10 +3507,12 @@ fn clusters_line_box(
     fonts: &FontStore,
     clusters: &[ShapedCluster],
     scale: f32,
-) -> Result<ooxml_text::LineBox, RenderError> {
+) -> Result<(ooxml_text::LineBox, ShiftExtents), RenderError> {
     let mut ascent: f32 = 0.0;
     let mut descent: f32 = 0.0;
     let mut leading: f32 = 0.0;
+    let mut shifted_ascent: f32 = 0.0;
+    let mut shifted_descent: f32 = 0.0;
     let mut seen = HashSet::new();
     for cluster in clusters {
         if !seen.insert(cluster.run_index) {
@@ -2900,15 +3520,40 @@ fn clusters_line_box(
         }
         let line = style_line_box(fonts, &cluster.style, scale)?;
         let shift = cluster.style.baseline_shift_px * scale;
-        ascent = ascent.max((line.ascent + shift).max(0.0));
-        descent = descent.max((line.descent - shift).max(0.0));
+        ascent = ascent.max(line.ascent);
+        descent = descent.max(line.descent);
         leading = leading.max(line.leading);
+        shifted_ascent = shifted_ascent.max((line.ascent + shift).max(0.0));
+        shifted_descent = shifted_descent.max((line.descent - shift).max(0.0));
     }
-    Ok(ooxml_text::LineBox {
-        ascent,
-        descent,
-        leading,
-    })
+    Ok((
+        ooxml_text::LineBox {
+            ascent,
+            descent,
+            leading,
+        },
+        ShiftExtents {
+            ascent: (shifted_ascent - ascent).max(0.0),
+            descent: (shifted_descent - descent).max(0.0),
+        },
+    ))
+}
+
+/// How far super/subscript ink reaches past the unshifted line box.
+#[derive(Clone, Copy, Default)]
+struct ShiftExtents {
+    ascent: f32,
+    descent: f32,
+}
+
+/// Spacing sets the pitch of the unshifted box; shifted ink then pushes the
+/// edges back out so a raised or lowered run is never clipped.
+fn shifted_line_box(line: ooxml_text::LineBox, extents: ShiftExtents) -> ooxml_text::LineBox {
+    ooxml_text::LineBox {
+        ascent: line.ascent + extents.ascent,
+        descent: line.descent + extents.descent,
+        leading: line.leading,
+    }
 }
 
 fn style_line_box(
@@ -2921,7 +3566,7 @@ fn style_line_box(
         .map_err(|error| RenderError::Font(error.to_string()))?;
     Ok(single_line_box(
         metrics,
-        points_to_px(style.font_size_pt * scale),
+        points_to_px(style.line_font_size_pt * scale),
         &CompatFlags::default(),
     ))
 }
@@ -2930,8 +3575,30 @@ fn style_line_box(
 fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
     clusters
         .iter()
-        .map(|cluster| points_to_px(cluster.style.font_size_pt * scale))
+        .map(|cluster| points_to_px(cluster.style.line_font_size_pt * scale))
         .fold(0.0_f32, f32::max)
+}
+
+/// `a:normAutofit/@fontScale`, applied verbatim: PowerPoint stores the scale it
+/// computed when the text last changed and re-fits only on edit, never on render.
+fn autofit_font_scale(autofit: Option<&TextAutofit>) -> f32 {
+    match autofit {
+        Some(TextAutofit::Normal { font_scale, .. }) => {
+            font_scale.unwrap_or(1.0).clamp(0.1, 1.0) as f32
+        }
+        _ => 1.0,
+    }
+}
+
+/// `a:normAutofit/@lnSpcReduction`, subtracted from percentage line spacing.
+fn autofit_line_space_reduction(autofit: Option<&TextAutofit>) -> f32 {
+    match autofit {
+        Some(TextAutofit::Normal {
+            line_space_reduction,
+            ..
+        }) => line_space_reduction.unwrap_or(0.0).clamp(0.0, 0.9) as f32,
+        _ => 0.0,
+    }
 }
 
 /// Apply paragraph spacing to a measured line box.
@@ -2941,22 +3608,15 @@ fn spaced_line_box(
     size_px: f32,
     scale: f32,
 ) -> ooxml_text::LineBox {
-    let Some(spacing) = paragraph.line_spacing else {
-        return content;
-    };
     if content.height() <= 0.0 {
         return content;
     }
-    let target = match spacing {
-        LineSpacing::Percent { value } => {
-            let single = if paragraph.compat_line_spacing {
-                SINGLE_LINE_PITCH_EM * size_px
-            } else {
-                content.height()
-            };
-            value as f32 * single
-        }
-        LineSpacing::Points { value } => points_to_px(value as f32 * scale),
+    let reduction = paragraph.line_space_reduction;
+    let single = SINGLE_LINE_PITCH_EM * size_px;
+    let target = match paragraph.line_spacing {
+        Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
+        Some(LineSpacing::Percent { value }) => (value as f32 - reduction).max(0.0) * single,
+        None => (1.0 - reduction) * single,
     };
     if !target.is_finite() || target < 0.0 {
         return content;
@@ -3258,6 +3918,63 @@ fn source_rect(crop: Option<&PictureCrop>) -> Option<(f64, f64, f64, f64)> {
     Some((-left / width, -top / height, 1.0 / width, 1.0 / height))
 }
 
+/// Maps a metafile clip rectangle into the picture box, or `None` when the clip
+/// leaves nothing of the box visible.
+/// whether a metafile clip would hide any of `path`, in the normalised space
+/// `metafile_clip_path` works in.
+fn clipped_away(path: &[GeometryPathCommand], clip: [f64; 4], rect: (f64, f64, f64, f64)) -> bool {
+    let Some(bounds) = metafile_clip_path(clip, rect) else {
+        return true;
+    };
+    let (mut left, mut top, mut right, mut bottom) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for command in &bounds {
+        if let GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } = command {
+            left = left.min(*x);
+            top = top.min(*y);
+            right = right.max(*x);
+            bottom = bottom.max(*y);
+        }
+    }
+    let outside = |x: &f64, y: &f64| *x < left || *x > right || *y < top || *y > bottom;
+    path.iter().any(|command| match command {
+        GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => outside(x, y),
+        GeometryPathCommand::Quad { cpx, cpy, x, y } => outside(cpx, cpy) || outside(x, y),
+        GeometryPathCommand::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => outside(cp1x, cp1y) || outside(cp2x, cp2y) || outside(x, y),
+        GeometryPathCommand::Close => false,
+    })
+}
+
+fn metafile_clip_path(
+    clip: [f64; 4],
+    rect: (f64, f64, f64, f64),
+) -> Option<Vec<GeometryPathCommand>> {
+    let (x0, y0, w, h) = rect;
+    let left = (x0 + clip[0] * w).max(0.0);
+    let top = (y0 + clip[1] * h).max(0.0);
+    let right = (x0 + clip[2] * w).min(1.0);
+    let bottom = (y0 + clip[3] * h).min(1.0);
+    if !(left < right && top < bottom) {
+        return None;
+    }
+    Some(vec![
+        GeometryPathCommand::Move { x: left, y: top },
+        GeometryPathCommand::Line { x: right, y: top },
+        GeometryPathCommand::Line {
+            x: right,
+            y: bottom,
+        },
+        GeometryPathCommand::Line { x: left, y: bottom },
+        GeometryPathCommand::Close,
+    ])
+}
+
 /// Maps a path measured in the metafile's frame into the picture box.
 fn place_in_source_rect(path: &mut [GeometryPathCommand], rect: (f64, f64, f64, f64)) {
     if rect == (0.0, 0.0, 1.0, 1.0) {
@@ -3366,6 +4083,12 @@ fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &Paragra
     if source.bullet_size.is_some() {
         target.bullet_size.clone_from(&source.bullet_size);
     }
+    if source.default_tab_size.is_some() {
+        target.default_tab_size = source.default_tab_size;
+    }
+    if source.tab_stops.is_some() {
+        target.tab_stops.clone_from(&source.tab_stops);
+    }
     if let Some(source) = &source.default_run {
         let target = target
             .default_run
@@ -3402,6 +4125,9 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     if source.baseline_pct.is_some() {
         target.baseline_pct = source.baseline_pct;
     }
+    if source.caps.is_some() {
+        target.caps = source.caps;
+    }
 }
 
 fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle {
@@ -3414,6 +4140,7 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
         underline: properties.underline.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
+        caps: properties.caps,
     }
 }
 
@@ -3570,6 +4297,7 @@ fn shadow(
     }
     let (anchor_x, anchor_y) = shadow_anchor(&outer.alignment, rect);
     Some(Shadow {
+        paths: Vec::new(),
         color,
         blur: safe_geometry(outer.blur_radius as f32 * (space.scale_x + space.scale_y) / 2.0),
         dx: safe_geometry(dx + anchor_x * (1.0 - scale_x)),
@@ -3651,6 +4379,7 @@ fn stroke(outline: &ShapeOutline, theme: &Theme) -> Option<Stroke> {
         .map(|width| width as f32 / EMU_PER_CSS_PIXEL)
         .unwrap_or(1.0);
     Some(Stroke {
+        join: outline.join.clone(),
         color,
         width,
         dashed: outline
@@ -3671,6 +4400,16 @@ fn picture_source(shape: Option<&ShapeNode>) -> Option<&Picture> {
     }
 }
 
+/// A picture's part path, or a marker resolving to its unsaved pending bytes.
+fn picture_asset_id(shape: &ShapeSnapshot) -> Option<String> {
+    shape.media_part_path.clone().or_else(|| {
+        shape
+            .pending_media
+            .as_ref()
+            .map(|_| format!("pending-media:{}", shape.id))
+    })
+}
+
 /// Clamps outsets and discards empty crops.
 fn image_crop(crop: &PictureCrop) -> ImageCrop {
     let fraction = |value: i32| (value as f32 / 100_000.0).clamp(0.0, 1.0);
@@ -3688,20 +4427,25 @@ fn image_crop(crop: &PictureCrop) -> ImageCrop {
     }
 }
 
-/// Resolves a picture's nonrectangular preset mask.
-fn picture_mask(
-    picture: &Picture,
-    rect: PxRect,
-) -> Option<Vec<ooxml_drawingml::GeometryPathCommand>> {
+#[derive(Default)]
+struct PictureMask {
+    path: Option<Vec<GeometryPathCommand>>,
+    geometry_fallback: bool,
+}
+
+fn picture_mask(picture: &Picture, rect: PxRect) -> PictureMask {
     if picture.geometry.is_empty() || picture.geometry == "rect" || rect.h <= 0.0 {
-        return None;
+        return PictureMask::default();
     }
-    let path = geometry_path(
+    let (path, geometry_fallback) = geometry_path_with_fallback(
         &picture.geometry,
         &picture.adjust_values,
         f64::from(rect.w) / f64::from(rect.h),
     );
-    (!path.is_empty()).then_some(path)
+    PictureMask {
+        path: (!path.is_empty()).then_some(path),
+        geometry_fallback,
+    }
 }
 
 fn custom_paths(shape: Option<&ShapeNode>) -> &[CustomGeometryPath] {
@@ -3739,6 +4483,7 @@ fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primit
             h,
             geometry,
             path,
+            geometry_fallback,
             stroke,
             shadow,
             transform,
@@ -3755,6 +4500,7 @@ fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primit
             effects: Vec::new(),
             crop: picture_fill_crop(picture),
             path: (geometry != "rect").then_some(path),
+            geometry_fallback,
             stroke,
             shadow,
             transform,
@@ -3797,13 +4543,25 @@ fn geometry_path(
     adjustments: &BTreeMap<String, f64>,
     aspect_ratio: f64,
 ) -> Vec<ooxml_drawingml::GeometryPathCommand> {
+    geometry_path_with_fallback(geometry, adjustments, aspect_ratio).0
+}
+
+fn geometry_path_with_fallback(
+    geometry: &str,
+    adjustments: &BTreeMap<String, f64>,
+    aspect_ratio: f64,
+) -> (Vec<ooxml_drawingml::GeometryPathCommand>, bool) {
     let adjustments = adjustments
         .iter()
         .map(|(name, value)| (name.clone(), *value))
         .collect();
-    preset_geometry_to_path(geometry, &adjustments, aspect_ratio)
-        .or_else(|| preset_geometry_to_path("rect", &HashMap::new(), aspect_ratio))
-        .unwrap_or_default()
+    match preset_geometry_to_path(geometry, &adjustments, aspect_ratio) {
+        Some(path) => (path, false),
+        None => (
+            preset_geometry_to_path("rect", &HashMap::new(), aspect_ratio).unwrap_or_default(),
+            true,
+        ),
+    }
 }
 
 fn graphic_label(graphic: Option<&GraphicFrameData>) -> Option<String> {
@@ -3853,25 +4611,68 @@ fn rect_covering_text(rect: PxRect, text: Option<&TextHit>) -> PxRect {
     }
 }
 
+/// A `buFont` symbol face reaches its glyphs by font position, so `buChar`
+/// names a slot rather than the character to draw. Checked against
+/// PowerPoint's own render of the corpus: Wingdings `§` draws a small filled
+/// square, Wingdings 3's `U+F075` a solid right-pointing triangle.
+fn symbol_bullet(marker: &str, font: Option<&BulletFont>, theme: &Theme) -> String {
+    let Some(BulletFont::Typeface(typeface)) = font else {
+        return marker.to_owned();
+    };
+    let typeface = if typeface.starts_with('+') {
+        resolve_theme_font_ref(Some(theme), typeface)
+    } else {
+        typeface.clone()
+    };
+    let Some(font) = ooxml_text::SymbolFont::named(&typeface) else {
+        return marker.to_owned();
+    };
+    marker
+        .chars()
+        .map(|character| font.substitute(character).unwrap_or(character))
+        .collect()
+}
+
+/// Per-level `a:buAutoNum` state: the number last drawn and the `startAt`
+/// the run was seeded from.
+#[derive(Default)]
+struct AutoNumbering {
+    numbers: [u32; 9],
+    starts: [u32; 9],
+}
+
 /// Resolves a marker once per paragraph.
-fn resolve_marker(bullet: Option<&Bullet>, level: u32, counters: &mut [u32; 9]) -> Option<String> {
-    let level = (level as usize).min(counters.len() - 1);
-    counters[level + 1..].fill(0);
+fn resolve_marker(
+    bullet: Option<&Bullet>,
+    level: u32,
+    numbering: &mut AutoNumbering,
+) -> Option<String> {
+    let level = (level as usize).min(numbering.numbers.len() - 1);
+    numbering.numbers[level + 1..].fill(0);
+    numbering.starts[level + 1..].fill(0);
     match bullet {
         Some(Bullet::AutoNumber {
             scheme,
             start_at,
             restart,
         }) => {
-            counters[level] = match counters[level] {
-                0 => (*start_at).clamp(1, 32_767),
-                _ if *restart => (*start_at).clamp(1, 32_767),
+            let start = (*start_at).clamp(1, 32_767);
+            // PowerPoint writes the list's `startAt` on every one of its
+            // paragraphs, so repeating the seed continues the run; only a
+            // different declared start opens a new list.
+            numbering.numbers[level] = match numbering.numbers[level] {
+                0 => start,
+                _ if *restart && numbering.starts[level] != start => start,
                 current => current.saturating_add(1),
             };
-            Some(format_autonum(counters[level], scheme))
+            if numbering.numbers[level] == start {
+                numbering.starts[level] = start;
+            }
+            Some(format_autonum(numbering.numbers[level], scheme))
         }
         _ => {
-            counters[level] = 0;
+            numbering.numbers[level] = 0;
+            numbering.starts[level] = 0;
             match bullet {
                 Some(Bullet::Character { value }) if !value.trim().is_empty() => {
                     Some(value.clone())
@@ -3962,6 +4763,24 @@ fn emu_to_px(value: i64) -> f32 {
     safe_geometry(value as f32 / EMU_PER_CSS_PIXEL)
 }
 
+/// A slide's page box is a whole number of points, the unit PowerPoint
+/// exports and prints it in, so the extent snaps there before the px scale.
+/// a slide is white paper, so a background the deck made fully transparent is
+/// not a hole onto whatever is behind it.
+fn is_invisible(paint: &Paint) -> bool {
+    fn clear(color: &str) -> bool {
+        color.len() == 9 && color.as_bytes()[7..] == *b"00"
+    }
+    match paint {
+        Paint::Solid { color } => clear(color),
+        Paint::Gradient { stops, .. } => !stops.is_empty() && stops.iter().all(|s| clear(&s.color)),
+    }
+}
+
+fn slide_extent_px(value: i64) -> f32 {
+    safe_geometry(((value as f64 / EMU_PER_POINT).round() * CSS_PIXELS_PER_POINT) as f32)
+}
+
 fn safe_geometry(value: f32) -> f32 {
     if value.is_finite() {
         value.clamp(-1.0e12, 1.0e12)
@@ -4002,6 +4821,22 @@ mod tests {
         include_bytes!("../../../packages/fonts/assets/LiberationSans-Italic.ttf");
     const BOLD_ITALIC_FONT: &[u8] =
         include_bytes!("../../../packages/fonts/assets/LiberationSans-BoldItalic.ttf");
+
+    #[test]
+    fn a_slide_extent_matches_the_page_powerpoint_exports() {
+        let page_px = |emu| (f64::from(slide_extent_px(emu)) * 150.0 / 96.0).ceil() as u32;
+        for (emu, px, dots) in [
+            (12_192_000, 1280.0, 2000),
+            (6_858_000, 720.0, 1125),
+            (10_691_813, 1122.6666, 1755),
+            (7_559_675, 793.3333, 1240),
+            (7_556_500, 793.3333, 1240),
+            (10_693_400, 1122.6666, 1755),
+        ] {
+            assert!((slide_extent_px(emu) - px).abs() < 0.001, "{emu}");
+            assert_eq!(page_px(emu), dots, "{emu}");
+        }
+    }
 
     #[test]
     fn a_source_crop_converts_to_fractions_and_refuses_what_cannot_be_drawn() {
@@ -4068,9 +4903,9 @@ mod tests {
             w: 100.0,
             h: 50.0,
         };
-        assert!(picture_mask(&picture, rect).is_none());
+        assert!(picture_mask(&picture, rect).path.is_none());
         picture.geometry = "ellipse".to_owned();
-        let path = picture_mask(&picture, rect).unwrap();
+        let path = picture_mask(&picture, rect).path.unwrap();
         assert_eq!(path.len(), 6);
         assert_eq!(
             path[0],
@@ -4192,8 +5027,8 @@ mod tests {
 
     #[test]
     fn autonumbering_counts_per_level_and_resumes_across_other_levels() {
-        let mut counters = [0_u32; 9];
-        let number = |level, counters: &mut [u32; 9]| {
+        let mut counters = AutoNumbering::default();
+        let number = |level, counters: &mut AutoNumbering| {
             resolve_marker(
                 Some(&Bullet::AutoNumber {
                     scheme: "arabicPeriod".to_owned(),
@@ -4204,7 +5039,7 @@ mod tests {
                 counters,
             )
         };
-        let dash = |level, counters: &mut [u32; 9]| {
+        let dash = |level, counters: &mut AutoNumbering| {
             resolve_marker(
                 Some(&Bullet::Character {
                     value: "-".to_owned(),
@@ -4227,8 +5062,8 @@ mod tests {
 
     #[test]
     fn inherited_autonumber_start_at_applies_only_to_the_first_item() {
-        let mut counters = [0_u32; 9];
-        let number = |counters: &mut [u32; 9]| {
+        let mut counters = AutoNumbering::default();
+        let number = |counters: &mut AutoNumbering| {
             resolve_marker(
                 Some(&Bullet::AutoNumber {
                     scheme: "arabicPeriod".to_owned(),
@@ -4241,7 +5076,7 @@ mod tests {
         };
         assert_eq!(number(&mut counters).as_deref(), Some("7."));
         assert_eq!(number(&mut counters).as_deref(), Some("8."));
-        let mut counters = [0; 9];
+        let mut counters = AutoNumbering::default();
         let last_start = Bullet::AutoNumber {
             scheme: "arabicPeriod".to_owned(),
             start_at: 32_767,
@@ -4274,7 +5109,7 @@ mod tests {
 
     #[test]
     fn autonumber_sequences_restart_after_plain_paragraphs_and_explicit_starts() {
-        let mut counters = [0; 9];
+        let mut counters = AutoNumbering::default();
         let number = Bullet::AutoNumber {
             scheme: "arabicPeriod".to_owned(),
             start_at: 1,
@@ -4327,6 +5162,38 @@ mod tests {
         );
     }
 
+    /// `pptarena-018-original` slide 11 declares `startAt="4"` on all four of
+    /// its paragraphs and PowerPoint renders 4, 5, 6, 7;
+    /// `pptarena-034-original` slide 11 declares `startAt="1"` on all five and
+    /// PowerPoint renders a) through e).
+    #[test]
+    fn a_repeated_declared_start_continues_the_list() {
+        let mut counters = AutoNumbering::default();
+        let arabic = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 4,
+            restart: true,
+        };
+        let alpha = Bullet::AutoNumber {
+            scheme: "alphaLcParenR".to_owned(),
+            start_at: 1,
+            restart: true,
+        };
+        assert_eq!(
+            (0..4)
+                .filter_map(|_| resolve_marker(Some(&arabic), 0, &mut counters))
+                .collect::<Vec<_>>(),
+            ["4.", "5.", "6.", "7."]
+        );
+        let mut counters = AutoNumbering::default();
+        assert_eq!(
+            (0..5)
+                .filter_map(|_| resolve_marker(Some(&alpha), 0, &mut counters))
+                .collect::<Vec<_>>(),
+            ["a)", "b)", "c)", "d)", "e)"]
+        );
+    }
+
     #[test]
     fn autonumber_roman_markers_bound_untrusted_start_values() {
         assert_eq!(format_autonum(0, "arabicPeriod"), "1.");
@@ -4343,6 +5210,134 @@ mod tests {
             renderer.register_font("Arial", bold, false, FONT).unwrap();
         }
         renderer
+    }
+
+    fn tabbed(
+        renderer: &SlideRenderer,
+        text: &str,
+        stops: Vec<f32>,
+        default_px: f32,
+    ) -> ResolvedParagraph {
+        let mut paragraph = paragraph(renderer, "l", text);
+        paragraph.tab_stops = stops;
+        paragraph.default_tab_px = default_px;
+        paragraph
+    }
+
+    fn glyph_positions(lines: &[PositionedTextLine]) -> Vec<f32> {
+        lines
+            .iter()
+            .flat_map(|line| line.runs.iter())
+            .flat_map(|run| run.glyphs.iter())
+            .map(|glyph| glyph.x)
+            .collect()
+    }
+
+    #[test]
+    fn a_tab_advances_to_the_next_default_stop_without_painting_a_glyph() {
+        let renderer = renderer();
+        let paragraph = tabbed(&renderer, "A\tB", Vec::new(), 96.0);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1_000.0, 1.0, false).unwrap();
+        let positions = glyph_positions(&lines);
+        assert_eq!(positions.len(), 2, "the tab paints nothing");
+        assert!(positions[0].abs() < 0.01, "{positions:?}");
+        assert!((positions[1] - 96.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn a_declared_stop_wins_over_the_default_pitch() {
+        let renderer = renderer();
+        let paragraph = tabbed(&renderer, "A\tB", vec![40.0, 300.0], 96.0);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1_000.0, 1.0, false).unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[1] - 40.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn the_left_margin_offsets_the_stop_a_tab_reaches() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "A\tB", vec![40.0, 200.0], 96.0);
+        paragraph.margin_left_px = 50.0;
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 50.0, 0.0, 950.0, 1.0, false).unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[1] - 200.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn a_tab_never_reaches_past_the_line() {
+        let renderer = renderer();
+        let paragraph = tabbed(&renderer, "A\tB", Vec::new(), 96.0);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 40.0, 1.0, false).unwrap();
+        for line in &lines {
+            assert!(line.width <= 40.01, "{}", line.width);
+        }
+    }
+
+    #[test]
+    fn a_leading_tab_in_a_hanging_indent_lands_on_the_margin_the_line_already_starts_at() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "\tItem", Vec::new(), 96.0);
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 300.0, 1.0, false).unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[0] - 30.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn only_the_first_tab_of_a_hanging_paragraph_measures_from_the_hanging_position() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "\tItem\tNote", Vec::new(), 96.0);
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 400.0, 1.0, false).unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[0] - 30.0).abs() < 0.01, "{positions:?}");
+        assert!((positions[4] - 96.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn a_marker_leaves_no_hanging_space_for_a_tab_to_take() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "\tItem", Vec::new(), 96.0);
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        paragraph.marker = Some("\u{2022}".to_owned());
+        paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 300.0, 1.0, false).unwrap();
+        let text = lines[0]
+            .runs
+            .iter()
+            .find(|run| run.text.contains("Item"))
+            .unwrap();
+        assert!(
+            (text.glyphs[0].x - 96.0).abs() < 0.01,
+            "{}",
+            text.glyphs[0].x
+        );
+    }
+
+    #[test]
+    fn tab_advance_bounds_a_hostile_pitch_and_offset() {
+        assert_eq!(tab_advance(0.0, 0.0, &[], 96.0, 1_000.0), 96.0);
+        assert_eq!(tab_advance(96.0, 96.0, &[], 96.0, 1_000.0), 96.0);
+        assert_eq!(tab_advance(1.0, 1.0, &[40.0], 96.0, 1_000.0), 39.0);
+        assert_eq!(tab_advance(10.0, 40.0, &[30.0], 96.0, 1_000.0), 0.0);
+        assert_eq!(tab_advance(f32::NAN, 0.0, &[], 96.0, 1_000.0), 0.0);
+        assert_eq!(tab_advance(0.0, f32::NAN, &[], 96.0, 1_000.0), 0.0);
+        assert_eq!(tab_advance(0.0, 0.0, &[], 96.0, f32::NAN), 0.0);
+        assert!((0.0..=10.0).contains(&tab_advance(f32::MAX, f32::MAX, &[], 96.0, 10.0)));
+        assert_eq!(resolve_default_tab(Some(0)), 96.0);
+        assert_eq!(resolve_default_tab(Some(-914_400)), 96.0);
     }
 
     fn justify(widths: &[(f32, bool, bool)]) -> Vec<JustifyCluster> {
@@ -4367,8 +5362,10 @@ mod tests {
             line_spacing: None,
             space_before: None,
             space_after: None,
-            compat_line_spacing: false,
+            line_space_reduction: 0.0,
             indent_px: 0.0,
+            tab_stops: Vec::new(),
+            default_tab_px: resolve_default_tab(None),
             marker: None,
             bullet_style: None,
             runs: vec![ResolvedRun {
@@ -4378,12 +5375,14 @@ mod tests {
                     face,
                     family: "Arial".to_owned(),
                     font_size_pt: 18.0,
+                    line_font_size_pt: 18.0,
                     spacing_pt: 0.0,
                     baseline_shift_px: 0.0,
                     bold: false,
                     italic: false,
                     underline: false,
                     color: "#000000".to_owned(),
+                    caps: TextCaps::None,
                 },
             }],
         }
@@ -4452,13 +5451,13 @@ mod tests {
     #[test]
     fn justified_layout_stretches_non_last_lines_only() {
         let renderer = renderer();
-        let text = "alpha beta \t  gamma delta";
+        let text = "alpha beta    gamma delta";
         let justified = paragraph(&renderer, "just", text);
         let clusters = shape_paragraph(&renderer.fonts, &justified, 1.0).unwrap();
         let second_break = clusters
             .iter()
             .enumerate()
-            .find(|(_, cluster)| cluster.end == utf16_len("alpha beta \t  "))
+            .find(|(_, cluster)| cluster.end == utf16_len("alpha beta    "))
             .map(|(index, _)| index + 1)
             .unwrap();
         let prefix_width = clusters[..second_break]
@@ -4602,12 +5601,14 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            line_font_size_pt: 14.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
             color: "#000000".to_owned(),
+            caps: TextCaps::None,
         };
         let mut variants = vec![style.clone(); 7];
         variants[0].color = "#A99A72".to_owned();
@@ -4627,8 +5628,10 @@ mod tests {
                 line_spacing: None,
                 space_before: None,
                 space_after: None,
-                compat_line_spacing: false,
+                line_space_reduction: 0.0,
                 indent_px: 0.0,
+                tab_stops: Vec::new(),
+                default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
                 runs: [style.clone(), changed.clone(), style.clone()]
@@ -4683,12 +5686,14 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            line_font_size_pt: 14.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: true,
             color: "#A99A72".to_owned(),
+            caps: TextCaps::None,
         };
         let paragraph = |parts: &[&str]| {
             let mut start = 0;
@@ -4701,8 +5706,10 @@ mod tests {
                 line_spacing: None,
                 space_before: None,
                 space_after: None,
-                compat_line_spacing: false,
+                line_space_reduction: 0.0,
                 indent_px: 0.0,
+                tab_stops: Vec::new(),
+                default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
                 runs: parts
@@ -4744,12 +5751,14 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 24.0,
+            line_font_size_pt: 24.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
             color: "#000000".to_owned(),
+            caps: TextCaps::None,
         };
         let stack = |text: &str| {
             let paragraph = ResolvedParagraph {
@@ -4761,8 +5770,10 @@ mod tests {
                 space_before: None,
                 space_after: None,
                 line_spacing: None,
-                compat_line_spacing: false,
+                line_space_reduction: 0.0,
                 indent_px: 0.0,
+                tab_stops: Vec::new(),
+                default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
                 runs: vec![ResolvedRun {
@@ -4790,7 +5801,7 @@ mod tests {
 
     #[test]
     fn gradient_stops_reach_the_display_list_in_position_order() {
-        use ooxml_drawingml::{ColorValue, GradientFill, GradientStop as ModelStop};
+        use ooxml_drawingml::{ColorValue, GradientStop as ModelStop};
 
         let stop = |position, rgb: &str, alpha| ModelStop {
             position,
@@ -4816,7 +5827,7 @@ mod tests {
                 let fill = ShapeFill {
                     fill_type: "gradient".to_owned(),
                     color: None,
-                    gradient: Some(GradientFill {
+                    gradient: Some(ooxml_drawingml::GradientFill {
                         gradient_type: kind.to_owned(),
                         angle: Some(45.0),
                         stops: indices.map(|index| ordered[index].clone()).to_vec(),
@@ -5389,6 +6400,196 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("{shape_id} was not drawn"))
+    }
+
+    #[test]
+    fn hiding_master_shapes_drops_the_layout_decoration_too() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_301).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        package.layouts[0]
+            .shapes
+            .push(package.slides[0].shapes[0].clone());
+        let shown = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert!(
+            painted_shape_ids(&shown)
+                .iter()
+                .any(|id| id.starts_with("layout:"))
+        );
+        package.slides[0].show_master_shapes = false;
+        let hidden = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert!(
+            painted_shape_ids(&hidden)
+                .iter()
+                .all(|id| !id.starts_with("layout:") && !id.starts_with("master:"))
+        );
+        assert_eq!(
+            hidden.display_list.background,
+            shown.display_list.background
+        );
+    }
+
+    #[test]
+    fn a_background_picture_paints_first_from_the_slide_or_the_theme() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_302).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture = PictureFill {
+            relationship_id: None,
+            media_part_path: Some("ppt/media/image1.png".to_owned()),
+            crop: PictureCrop::default(),
+            fill_rect: PictureCrop {
+                top: -6_000,
+                bottom: -6_000,
+                ..PictureCrop::default()
+            },
+        };
+        package.slides[0].background_picture = Some(Box::new(picture.clone()));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let Primitive::Image {
+            object_id,
+            asset_id,
+            x,
+            y,
+            w,
+            h,
+            crop,
+            ..
+        } = &rendered.display_list.primitives[0]
+        else {
+            panic!("the background paints before every shape")
+        };
+        assert_eq!(*object_id, 0);
+        assert_eq!(asset_id.as_deref(), Some("ppt/media/image1.png"));
+        assert_eq!(
+            (*x, *y, *w, *h),
+            (
+                0.0,
+                0.0,
+                rendered.display_list.width,
+                rendered.display_list.height
+            )
+        );
+        assert!(crop.top > 0.0 && crop.bottom > 0.0);
+
+        package.slides[0].background_picture = None;
+        package.slides[0].background = None;
+        package.slides[0].background_reference = Some(StyleReference {
+            index: 1_003,
+            color: None,
+        });
+        package.themes[0].background_pictures = vec![None, None, Some(picture)];
+        let referenced = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert_eq!(
+            referenced.display_list.primitives[0],
+            rendered.display_list.primitives[0]
+        );
+    }
+
+    /// a deck whose master fills the slide at alpha 0 still renders on paper.
+    #[test]
+    fn a_fully_transparent_background_renders_as_white_paper() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_311).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        package.slides[0].background_reference = None;
+        package.slides[0].background = Some(ShapeFill {
+            fill_type: "solid".to_owned(),
+            color: Some(ColorValue {
+                rgb: Some("123456".to_owned()),
+                alpha: Some(0.0),
+                ..ColorValue::default()
+            }),
+            gradient: None,
+        });
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert_eq!(
+            rendered.display_list.background,
+            Some(Paint::Solid {
+                color: "#ffffff".to_owned()
+            })
+        );
+    }
+
+    /// a gradient whose every stop is transparent is paper too, while one
+    /// visible stop keeps the gradient.
+    #[test]
+    fn a_gradient_paints_unless_every_stop_is_transparent() {
+        let clear = |alpha: f64| ColorValue {
+            rgb: Some("123456".to_owned()),
+            alpha: Some(alpha),
+            ..ColorValue::default()
+        };
+        let gradient = |stops: Vec<ColorValue>| ShapeFill {
+            fill_type: "gradient".to_owned(),
+            color: None,
+            gradient: Some(ooxml_drawingml::GradientFill {
+                gradient_type: "linear".to_owned(),
+                angle: None,
+                stops: stops
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, color)| ooxml_drawingml::GradientStop {
+                        position: index as f64,
+                        color,
+                    })
+                    .collect(),
+            }),
+        };
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_317).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        package.slides[0].background_reference = None;
+        package.slides[0].background = Some(gradient(vec![clear(0.0), clear(0.0)]));
+        assert_eq!(
+            renderer()
+                .layout_slide(&package, &snapshot, 0)
+                .unwrap()
+                .display_list
+                .background,
+            Some(Paint::Solid {
+                color: "#ffffff".to_owned()
+            })
+        );
+        package.slides[0].background = Some(gradient(vec![clear(0.0), clear(1.0)]));
+        assert!(matches!(
+            renderer()
+                .layout_slide(&package, &snapshot, 0)
+                .unwrap()
+                .display_list
+                .background,
+            Some(Paint::Gradient { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unpaintable_background_style_keeps_the_reference_colour() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_303).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let color = ColorValue {
+            rgb: Some("123456".to_owned()),
+            ..ColorValue::default()
+        };
+        package.slides[0].background = Some(ShapeFill {
+            fill_type: "theme".to_owned(),
+            color: Some(color),
+            gradient: None,
+        });
+        package.slides[0].background_reference = Some(StyleReference {
+            index: 1_003,
+            color: None,
+        });
+        package.themes[0].format_scheme.background_fills =
+            vec![None, None, Some(ShapeFill::named("picture"))];
+        package.themes[0].background_pictures = Vec::new();
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert_eq!(
+            rendered.display_list.background,
+            Some(Paint::Solid {
+                color: "#123456".to_owned()
+            })
+        );
     }
 
     #[test]
@@ -6250,22 +7451,23 @@ mod tests {
             1_524_000,
             true,
         );
-        let (font_based, _) = wrapped_text_box(8_017, percent(0.8), None, 1_524_000, false);
+        let (no_compat, _) = wrapped_text_box(8_017, percent(0.8), None, 1_524_000, false);
+        let (tighter, _) = wrapped_text_box(8_018, percent(0.6), None, 1_524_000, true);
         let pitch = |lines: &[PositionedTextLine]| {
             assert!(lines.len() > 1, "expected the text to wrap");
             lines[1].y - lines[0].y
         };
         let size_px = points_to_px(size_pt);
 
-        assert!((pitch(&single) - single[0].height).abs() < 0.01);
+        assert!((pitch(&single) - 1.2 * size_px).abs() < 0.05);
         assert!((pitch(&tight) - 0.8 * 1.2 * size_px).abs() < 0.05);
-        assert!((pitch(&font_based) - 0.8 * single[0].height).abs() < 0.05);
+        assert!((pitch(&no_compat) - pitch(&tight)).abs() < 0.05);
         assert!(pitch(&tight) < pitch(&single));
         assert!((pitch(&loose) - points_to_px(40.0)).abs() < 0.05);
 
-        let share = (tight[0].baseline - tight[0].y) / pitch(&tight);
-        let font_share = (single[0].baseline - single[0].y) / single[0].height;
-        assert!((share - font_share).abs() < 0.01);
+        let share =
+            |lines: &[PositionedTextLine]| (lines[0].baseline - lines[0].y) / lines[0].height;
+        assert!((share(&tight) - share(&tighter)).abs() < 0.01);
     }
 
     #[test]
@@ -6502,7 +7704,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_autofit_scales_text_until_the_shape_height_is_respected() {
+    fn normal_autofit_applies_the_stored_font_scale_without_refitting() {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let session = DeckSession::open(FIXTURE, 8_003).unwrap();
         let initial = session.snapshot().unwrap();
@@ -6574,7 +7776,21 @@ mod tests {
             panic!("expected text shape");
         };
         parsed.text.as_mut().unwrap().autofit = Some(TextAutofit::None);
-        assert!(scaled < font_size(&package));
+        let natural = font_size(&package);
+        assert!((scaled - natural).abs() < 0.001);
+        let ShapeNode::Shape(parsed) = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.id() == source_id)
+            .unwrap()
+        else {
+            panic!("expected text shape");
+        };
+        parsed.text.as_mut().unwrap().autofit = Some(TextAutofit::Normal {
+            font_scale: Some(0.5),
+            line_space_reduction: None,
+        });
+        assert!((font_size(&package) - natural * 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -6811,6 +8027,32 @@ mod tests {
         bytes
     }
 
+    /// `triangle_emf` with the left-top quarter of the frame selected as the
+    /// clip path before the fill.
+    fn clipped_triangle_emf() -> Vec<u8> {
+        let mut bytes = triangle_emf();
+        let record = |kind: u32, body: Vec<u8>| {
+            let mut out = kind.to_le_bytes().to_vec();
+            out.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
+            out.extend(body);
+            out
+        };
+        let i32s =
+            |values: &[i32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        let mut polyline = i32s(&[0, 0, 0, 0, 4]);
+        for (x, y) in [(0i16, 0i16), (0, 50), (50, 50), (50, 0)] {
+            polyline.extend_from_slice(&x.to_le_bytes());
+            polyline.extend_from_slice(&y.to_le_bytes());
+        }
+        let mut clip = record(59, Vec::new());
+        clip.extend(record(27, i32s(&[0, 0])));
+        clip.extend(record(89, polyline));
+        clip.extend(record(60, Vec::new()));
+        clip.extend(record(67, i32s(&[5])));
+        bytes.splice(88..88, clip);
+        bytes
+    }
+
     /// The demo deck with one extra master picture pointing at `media`.
     fn deck_with_master_picture(media: Vec<u8>) -> (PptxPackage, DeckSnapshot) {
         deck_with_cropped_master_picture(media, PictureCrop::default())
@@ -6887,6 +8129,7 @@ mod tests {
                     h: 96.0,
                 },
             )
+            .path
             .unwrap();
             let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
             let shapes = rendered
@@ -6917,6 +8160,34 @@ mod tests {
             assert_eq!(*path, mask);
             assert!(fill.is_none());
             assert_eq!(stroke.color, "#0000FF");
+        }
+    }
+
+    #[test]
+    fn unsupported_picture_masks_report_fallbacks_for_bitmaps_and_metafiles() {
+        for media in [b"not a metafile".to_vec(), triangle_emf()] {
+            let (mut package, snapshot) = deck_with_master_picture(media);
+            let ShapeNode::Picture(picture) = package.masters[0].shapes.last_mut().unwrap() else {
+                panic!()
+            };
+            picture.geometry = "unknownPreset".into();
+            let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+            let primitives: Vec<_> = rendered
+                .display_list
+                .primitives
+                .iter()
+                .filter(|p| match p {
+                    Primitive::Shape { name, .. } | Primitive::Image { name, .. } => name == "Logo",
+                    _ => false,
+                })
+                .collect();
+            assert!(!primitives.is_empty());
+            for primitive in primitives {
+                assert_eq!(
+                    serde_json::to_value(primitive).unwrap()["geometryFallback"],
+                    true
+                );
+            }
         }
     }
 
@@ -6995,6 +8266,34 @@ mod tests {
         assert_eq!(
             path[1],
             ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.0 }
+        );
+    }
+
+    #[test]
+    fn a_metafile_clip_narrows_the_shape_clip_to_the_clipped_region() {
+        let (package, snapshot) = deck_with_master_picture(clipped_triangle_emf());
+        let primitives = renderer()
+            .layout_slide(&package, &snapshot, 0)
+            .unwrap()
+            .display_list
+            .primitives;
+
+        let clip = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Shape { name, clip, .. } if name == "Logo" => clip.clone(),
+                _ => None,
+            })
+            .expect("the clipped metafile paints");
+        assert_eq!(
+            clip,
+            vec![
+                ooxml_drawingml::GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.0 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.5 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.0, y: 0.5 },
+                ooxml_drawingml::GeometryPathCommand::Close,
+            ]
         );
     }
 
@@ -7242,6 +8541,7 @@ mod tests {
             outline: None,
             resolved_outline_color: None,
             media_part_path: None,
+            pending_media: None,
             blip_effects: Vec::new(),
             graphic: None,
             text_stories: Vec::new(),

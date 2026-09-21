@@ -38,6 +38,7 @@ import { mergeTextFormatting } from '../utils/textFormattingMerge';
 import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsRawOp, YrsSession } from './index';
+import { noteYrsStoriesDirty } from './yrsToDocument';
 import {
   blockSdtAttrsToPayload,
   blockSdtStoryId,
@@ -119,6 +120,12 @@ interface LoweringContext {
   styleResolver: StyleResolver | null;
   theme: Theme | null;
   plans: StoryPlan[];
+  compatibilityMode: number;
+}
+
+function compatibilityModeFromDocument(document: Document): number {
+  const mode = document.package.settings?.compatibilityFlags?.compatibilityMode;
+  return typeof mode === 'number' && Number.isFinite(mode) ? Math.trunc(mode) : 12;
 }
 
 const BOOLEAN_MARKS = new Set([
@@ -240,6 +247,9 @@ function formattingToMarks(formatting: TextFormatting | undefined): MarkDescript
   if (formatting.outline) add('textOutline');
   if (formatting.hidden) add('hidden');
   if (formatting.rtl) add('rtl');
+  // Document-grid opt-out (w:snapToGrid, default on): only an authored off
+  // becomes a mark, mirroring how the layout bridge reads it.
+  if (formatting.snapToGrid === false) marks.push({ name: 'snapToGrid', attrs: {} });
   if (formatting.effect && formatting.effect !== 'none') {
     add('textEffect', { effect: formatting.effect });
   }
@@ -256,6 +266,8 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
     if (mark.name === 'comment' || mark.name === 'footnoteRef') continue;
     if (BOOLEAN_MARKS.has(mark.name)) {
       attrs[mark.name] = true;
+    } else if (mark.name === 'snapToGrid') {
+      attrs.snapToGrid = false;
     } else if (mark.name === 'highlight') {
       attrs.highlight = mark.attrs.color;
     } else if (mark.name === 'insertion' || mark.name === 'deletion') {
@@ -790,6 +802,44 @@ function noteRefMarkTypes(run: Run): string[] {
   return marks;
 }
 
+function unitsText(units: readonly InlineUnit[]): string {
+  return units
+    .map((unit) => {
+      if (unit.kind === 'text') return unit.text;
+      const id = unit.payload.footnoteRefId ?? unit.payload.endnoteRefId;
+      return String(id ?? '');
+    })
+    .join('');
+}
+
+/**
+ * `w:br w:type="page"|"column"`, which the story carries as a block embed
+ * beside the paragraph instead of as an inline unit.
+ */
+function flowBreakType(content: RunContent): 'page' | 'column' | null {
+  if (content.type !== 'break') return null;
+  return content.breakType === 'page' || content.breakType === 'column' ? content.breakType : null;
+}
+
+/**
+ * Where a run's flow breaks sit in its text. They occupy no story unit, so
+ * the save projection rebuilds them from these offsets.
+ */
+function flowBreakOffsets(run: Run): Array<{ offset: number; type: 'page' | 'column' }> {
+  if (!run.content.some((content) => flowBreakType(content) !== null)) return [];
+  const breaks: Array<{ offset: number; type: 'page' | 'column' }> = [];
+  let offset = 0;
+  for (const content of run.content) {
+    const type = flowBreakType(content);
+    if (type !== null) {
+      breaks.push({ offset, type });
+      continue;
+    }
+    offset += unitsText(runContentToUnits(content, [])).length;
+  }
+  return breaks;
+}
+
 function runBoundary(
   run: Run,
   styleFormatting: TextFormatting | undefined,
@@ -800,17 +850,12 @@ function runBoundary(
   const keys = units.map((unit) => marksKey(unit.marks));
   if (keys.some((key) => key !== keys[0])) return null;
   const marks = noteRefMarkTypes(run);
-  const text = units
-    .map((unit) => {
-      if (unit.kind === 'text') return unit.text;
-      const id = unit.payload.footnoteRefId ?? unit.payload.endnoteRefId;
-      return String(id ?? '');
-    })
-    .join('');
+  const breaks = flowBreakOffsets(run);
   const key = keys[0];
   return {
-    text,
+    text: unitsText(units),
     ...(marks.length > 0 ? { noteMarks: marks } : {}),
+    ...(breaks.length > 0 ? { breaks } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),
     ...(run.formatting ? { formatting: run.formatting } : {}),
     ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),
@@ -843,6 +888,9 @@ function paragraphAttrs(
     listMarkerHidden: paragraph.listRendering?.markerHidden || null,
     listMarkerFontFamily: paragraph.listRendering?.markerFontFamily || null,
     listMarkerFontSize: paragraph.listRendering?.markerFontSize || null,
+    listMarkerBold: paragraph.listRendering?.markerBold ?? null,
+    listMarkerItalic: paragraph.listRendering?.markerItalic ?? null,
+    listMarkerColor: paragraph.listRendering?.markerColor ?? null,
     listMarkerSuffix: paragraph.listRendering?.markerSuffix || null,
     listLevelNumFmts: paragraph.listRendering?.levelNumFmts || null,
     listAbstractNumId: paragraph.listRendering?.abstractNumId ?? null,
@@ -888,6 +936,9 @@ function paragraphAttrs(
     attrs.keepLines = formatting?.keepLines ?? stylePpr?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? stylePpr?.widowControl ?? null;
     attrs.contextualSpacing = formatting?.contextualSpacing ?? stylePpr?.contextualSpacing ?? null;
+    attrs.snapToGrid = formatting?.snapToGrid ?? stylePpr?.snapToGrid ?? null;
+    attrs.autoSpaceDE = formatting?.autoSpaceDE ?? stylePpr?.autoSpaceDE ?? null;
+    attrs.autoSpaceDN = formatting?.autoSpaceDN ?? stylePpr?.autoSpaceDN ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? stylePpr?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? stylePpr?.bidi ?? null;
 
@@ -928,6 +979,9 @@ function paragraphAttrs(
     attrs.keepNext = formatting?.keepNext ?? null;
     attrs.keepLines = formatting?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? null;
+    attrs.snapToGrid = formatting?.snapToGrid ?? null;
+    attrs.autoSpaceDE = formatting?.autoSpaceDE ?? null;
+    attrs.autoSpaceDN = formatting?.autoSpaceDN ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? null;
     attrs.defaultTextFormatting = formatting?.runProperties ?? null;
@@ -947,7 +1001,7 @@ function paragraphAttrs(
     }
   }
   if (paragraph.renderedPageBreakBefore) attrs.renderedPageBreakBefore = true;
-  if (paragraphStartsWithPageBreak(paragraph)) attrs.pageBreakBefore = true;
+  if (paragraphStartsWithPageBreak(paragraph)) attrs.pageBreakBeforeRun = true;
   if (paragraph.pPrIns) {
     attrs.pPrIns = {
       revisionId: paragraph.pPrIns.id,
@@ -1364,7 +1418,8 @@ function projectRow(
 function projectTable(
   table: Table,
   styleResolver: StyleResolver | null,
-  theme: Theme | null
+  theme: Theme | null,
+  compatibilityMode: number
 ): ProjectedTable {
   const defaultStyle = styleResolver?.getDefaultTableStyle();
   const styleId = table.formatting?.styleId;
@@ -1414,6 +1469,9 @@ function projectTable(
     cellMargins: defaultMargins ?? null,
     look: table.formatting?.look ?? null,
     bidi: table.formatting?.bidi || null,
+    // Omit the default so pre-existing yrs snapshots (no field) keep matching;
+    // the bridge treats an absent mode as 12.
+    compatibilityMode: compatibilityMode === 12 ? null : compatibilityMode,
     _originalFormatting: originalFormatting,
   };
   if (table.propertyChanges?.length) attrs.tblPrChange = table.propertyChanges;
@@ -1456,6 +1514,71 @@ function addCommentCoverage(plan: StoryPlan): void {
   }
 }
 
+interface BlockCursor {
+  paragraph: number;
+  table: number;
+  sdt: number;
+}
+
+/** Hands each block of a story the identity `visitStory` seeds it with. */
+function takeBlockId(cursor: BlockCursor, storyId: string, block: BlockContent): string | null {
+  if (isRawXml(block)) return null;
+  if (block.type === 'paragraph') {
+    const index = cursor.paragraph++;
+    return block.paraId || `${storyId}:p${index}`;
+  }
+  if (block.type === 'table') return `${storyId}:t${cursor.table++}`;
+  return blockSdtStoryId(storyId, cursor.sdt++);
+}
+
+function numericFieldInstruction(instruction: string): boolean {
+  return /^\d+$/.test(instruction.trim());
+}
+
+/** How many story blocks a suppressed field's cached result duplicates. */
+function cachedResultBlockCount(field: SimpleField | ComplexField): number | null {
+  const blocks = field.structuredResult?.blocks ?? [];
+  const last = blocks[blocks.length - 1];
+  if (!last || last.type !== 'paragraph' || (last.content?.length ?? 0) > 0) return null;
+  return blocks.length;
+}
+
+/** Binds each suppressed field to the story blocks its cached result duplicates. */
+function bindFieldResultBlocks(
+  units: readonly InlineUnit[],
+  storyId: string,
+  blocks: readonly BlockContent[],
+  owner: number,
+  afterOwner: BlockCursor,
+  tableIds: Map<number, string>
+): void {
+  for (const unit of units) {
+    if (unit.kind !== 'embed' || unit.embedKind !== 'field') continue;
+    const instruction = unit.payload.instruction;
+    if (typeof instruction !== 'string' || !numericFieldInstruction(instruction)) continue;
+    const data = unit.payload.fieldData;
+    if (typeof data !== 'string') continue;
+    let parsed: SimpleField | ComplexField;
+    try {
+      parsed = JSON.parse(data) as SimpleField | ComplexField;
+    } catch {
+      continue;
+    }
+    const count = cachedResultBlockCount(parsed);
+    if (count === null || owner + 1 + count > blocks.length) continue;
+    const cursor = { ...afterOwner };
+    const ids: string[] = [];
+    for (let offset = 0; offset < count; offset += 1) {
+      const block = blocks[owner + 1 + offset]!;
+      const id = takeBlockId(cursor, storyId, block);
+      if (id === null) continue;
+      if (block.type === 'table') tableIds.set(owner + 1 + offset, id);
+      ids.push(id);
+    }
+    if (ids.length > 0) unit.payload.fieldResultBlocks = ids;
+  }
+}
+
 function visitStory(
   context: LoweringContext,
   storyId: string,
@@ -1470,13 +1593,15 @@ function visitStory(
   context.plans.push(plan);
   const blocks =
     sourceBlocks.length > 0 ? [...sourceBlocks] : [{ type: 'paragraph', content: [] } as Paragraph];
-  let tableIndex = 0;
-  let sdtIndex = 0;
-  let paragraphIndex = 0;
+  const cursor: BlockCursor = { paragraph: 0, table: 0, sdt: 0 };
+  const resultTableIds = new Map<number, string>();
   let lastKind: 'paragraph' | 'table' | 'blockSdt' | null = null;
 
-  for (const block of blocks) {
+  for (const [blockIndex, block] of blocks.entries()) {
     if (isRawXml(block)) continue;
+    const currentTable = cursor.table;
+    const blockId = takeBlockId(cursor, storyId, block);
+    if (blockId === null) continue;
     if (block.type === 'paragraph') {
       const paragraph = paragraphUnits(
         block,
@@ -1484,14 +1609,16 @@ function visitStory(
         options.extraRunFormatting,
         options.tableParagraphFormatting
       );
-      plan.units.push(...paragraph.units);
-      plan.units.push(
-        embedUnit('pilcrow', {
-          ...paragraph.ppr,
-          paraId: block.paraId || `${storyId}:p${paragraphIndex}`,
-        })
+      bindFieldResultBlocks(
+        paragraph.units,
+        storyId,
+        blocks,
+        blockIndex,
+        cursor,
+        resultTableIds
       );
-      paragraphIndex += 1;
+      plan.units.push(...paragraph.units);
+      plan.units.push(embedUnit('pilcrow', { ...paragraph.ppr, paraId: blockId }));
       if (options.includePageBreaks && paragraphHasNonLeadingPageBreak(block)) {
         plan.units.push(embedUnit('pageBreak', {}));
       }
@@ -1499,8 +1626,12 @@ function visitStory(
       continue;
     }
     if (block.type === 'table') {
-      const currentTable = tableIndex++;
-      const table = projectTable(block, context.styleResolver, context.theme);
+      const table = projectTable(
+        block,
+        context.styleResolver,
+        context.theme,
+        context.compatibilityMode
+      );
       const rows = table.rows.map((row, rowIndex) => ({
         trPr: row.attrs,
         cells: row.cells.map((cell, cellIndex) => ({
@@ -1508,11 +1639,13 @@ function visitStory(
           story: tableCellStoryId(storyId, currentTable, rowIndex, cellIndex),
         })),
       }));
+      const resultTableId = resultTableIds.get(blockIndex);
       plan.units.push(
         embedUnit('table', {
           tblPr: tableAttrsToTblPr(table.attrs),
           grid: tableAttrsToGrid(table.attrs),
           rows,
+          ...(resultTableId === undefined ? {} : { blockId: resultTableId }),
         })
       );
       table.rows.forEach((row, rowIndex) => {
@@ -1534,8 +1667,7 @@ function visitStory(
       lastKind = 'table';
       continue;
     }
-    const currentSdt = sdtIndex++;
-    const childStory = blockSdtStoryId(storyId, currentSdt);
+    const childStory = blockId;
     plan.units.push(
       embedUnit('blockSdt', {
         ...blockSdtAttrs(block.properties),
@@ -1555,7 +1687,7 @@ function visitStory(
     plan.units.push(
       embedUnit('pilcrow', {
         hangingIndent: false,
-        paraId: `${storyId}:p${paragraphIndex}`,
+        paraId: `${storyId}:p${cursor.paragraph}`,
       })
     );
   }
@@ -1622,10 +1754,12 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
  * @public
  */
 export function documentToYrs(session: YrsSession, document: Document): void {
+  noteYrsStoriesDirty(session, 'all');
   const context: LoweringContext = {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
     theme: document.package.theme ?? null,
     plans: [],
+    compatibilityMode: compatibilityModeFromDocument(document),
   };
   visitStory(context, 'body', document.package.document.content, {
     includePageBreaks: true,

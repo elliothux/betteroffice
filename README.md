@@ -15,8 +15,34 @@
   <a href="https://crates.io/search?q=betteroffice"><img src="https://betteroffice.dev/api/crates-downloads-badge" alt="crates.io downloads"></a>
   <a href="https://pypi.org/project/betteroffice-xlsx/"><img src="https://betteroffice.dev/api/pypi-downloads-badge" alt="PyPI downloads"></a>
   <a href="https://betteroffice.dev"><img src="https://betteroffice.dev/api/badge?label=&amp;message=betteroffice.dev&amp;color=0a0a0a" alt="betteroffice.dev"></a>
-  <a href="https://openooxml.org"><img src="https://betteroffice.dev/api/badge?label=&amp;message=openooxml.org&amp;color=0a0a0a" alt="openooxml.org"></a>
 </p>
+
+## Features
+
+- **Documents, spreadsheets, and slides.** Open, edit, render, and save DOCX,
+  XLSX and PPTX files with high fidelity. Native OOXML editing preserves untouched
+  file parts losslessly when round-tripping.
+
+- **Agent editing with human review.** Review attributed agent edits through
+  tracked changes, inline diffs, and before-and-after previews. Accept or
+  reject changes directly in the editor.
+
+- **Real-time collaboration.** People and agents edit the same file together,
+  with live cursors and selections. Concurrent changes merge automatically,
+  and offline edits sync when peers reconnect.
+
+- **Undo and redo.** Navigate editing history and undo accepted agent
+  proposals as a single step.
+
+- **Embed or automate.** Drop React editors into your app, build on the
+  framework-free JavaScript cores, or use Rust and Python APIs for headless
+  processing and agent workflows.
+
+- **Open source and self-hostable.** Apache-2.0 licensed, with control over
+  your document storage, deployment, and collaboration infrastructure.
+
+[Try it out](https://demo.betteroffice.dev), or
+[explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 
 ## Packages
 
@@ -28,10 +54,6 @@
 | [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | npm | framework-free .docx editor core — parsing, CRDT editing, and page layout in Rust through WebAssembly |
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
-
-DOCX layout omits hidden content by default. Set `showHiddenText: true` in `YrsRenderEnv` to reveal it without changing the document's hidden formatting.
-
-Standard legacy VML horizontal rules render in DOCX and retain their source XML through editing and saving. DrawingML plus shapes render with their authored adjustments. Elliptical pictures render with crops and borders. Other picture presets retain rectangular rendering; soft-edge effects are unsupported.
 
 ### Spreadsheets — `.xlsx`
 
@@ -47,22 +69,63 @@ Standard legacy VML horizontal rules render in DOCX and retain their source XML 
 | package | registry | what it does |
 |---|---|---|
 | [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | crates.io | typed Rust API for opening, editing, rendering, and saving PPTX presentations |
-| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core — slide model, masters, and rendering in Rust through WebAssembly |
+| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core — slide model, masters, image insertion, shape ordering, and rendering in Rust through WebAssembly |
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
 
-The browser React editor renders supported bitmap-only WMF wrappers. Custom browser image loaders can use `presentationImageBlob(bytes)` from `@betteroffice/pptx` for the same limited WMF support.
+### Diagrams (`.vsdx`, source preview)
 
-### Diagrams — `.vsdx`
-
-Visio drawings (`.vsdx`) and templates (`.vstx`) open in the source-available VSDX core, which is not yet published. Stencils (`.vssx`) and macro-enabled files are not supported.
-
-The editor puts a flat command bar and a searchable thirty-two shape gallery over a focusable canvas: gallery shapes drag onto it and land where they are dropped, and the canvas offers in-place shape text editing, keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus.
+VSDX support is available from source and is not yet published.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),
 [PyPI](https://docs.betteroffice.dev/docs/python).
+
+<!-- BEGIN GENERATED VISUAL FIDELITY -->
+## Benchmarks
+
+*Generated by the [Benchmarks action](.github/workflows/visual-fidelity.yml).*
+
+### DOCX
+
+Page agreement is reported on its own because a document either paginates as Word does or it does not; SSIM cannot express that.
+
+<table>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e8ce123fa9f8e9efc5096811fb98f6f0c17d2e48">e8ce123f</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>Exact page counts</td><td align="right">48/63</td><td align="right">63/63</td><td align="right">45/63</td></tr>
+<tr><td>Absolute page error</td><td align="right">32</td><td align="right">0</td><td align="right">56</td></tr>
+<tr><td>SSIM</td><td align="right">0.7540</td><td align="right">0.8368</td><td align="right">0.7749</td></tr>
+<tr><td>Scored/total</td><td align="right">63/63</td><td align="right">63/63</td><td align="right">63/63</td></tr>
+<tr><td>Render time (avg)</td><td align="right">546 ms</td><td align="right">527 ms</td><td align="right">788 ms</td></tr>
+<tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
+</table>
+
+
+### PPTX
+
+<table>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1">0.1.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e8ce123fa9f8e9efc5096811fb98f6f0c17d2e48">e8ce123f</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>SSIM</td><td align="right">0.8667</td><td align="right">0.8924</td><td align="right">0.9043</td></tr>
+<tr><td>Scored/total</td><td align="right">88/103</td><td align="right">103/103</td><td align="right">103/103</td></tr>
+<tr><td>Render time (avg)</td><td align="right">205 ms</td><td align="right">144 ms</td><td align="right">1310 ms</td></tr>
+<tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
+</table>
+
+### XLSX
+
+<table>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e8ce123fa9f8e9efc5096811fb98f6f0c17d2e48">e8ce123f</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>SSIM</td><td align="right">0.7002</td><td align="right">0.7660</td><td align="right">0.6901</td></tr>
+<tr><td>Scored/total</td><td align="right">205/208</td><td align="right">207/208</td><td align="right">204/208</td></tr>
+<tr><td>Recalc accuracy</td><td align="right">68.28%</td><td align="right">99.60%</td><td align="right">85.87%</td></tr>
+<tr><td>Recalc time (avg)</td><td align="right">70 ms</td><td align="right">89 ms</td><td align="right">466 ms</td></tr>
+<tr><td>Parse success</td><td align="right">99.52%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
+</table>
+
+For scoring, timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).
+
+<!-- END GENERATED VISUAL FIDELITY -->
 
 ## Structure
 
@@ -70,34 +133,22 @@ What to install for which language, with a first example each:
 - `packages/` — the TypeScript editor packages
 - `bindings/` — the Python bindings
 - `apps/web` — [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
+- `apps/demo` — editor playground
 - `apps/docs` — documentation
 
 ## Development
 
 ```bash
 bun install
-bun run build:xlsx-wasm # compile the ignored spreadsheet wasm asset
-bun run build:docx-wasm # compile the ignored document wasm assets
-bun run dev          # web app
+bun run dev:demo     # editor playground; builds the wasm bundles on first run
+bun run dev          # betteroffice.dev site (no wasm needed)
+bun run dev:docs     # documentation site
 bun run rust:check   # fmt + clippy + tests for the engines
 ```
 
 Use the [Office visual quality harness](scripts/office-quality/README.md) to export Word, PowerPoint, and Excel references, compare local renders, or refresh the fidelity scores with the manual action.
 
-<!-- BEGIN GENERATED VISUAL FIDELITY -->
-## Visual fidelity
 
-*Generated by the [Visual fidelity action](.github/workflows/visual-fidelity.yml).*
-
-| Format | Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
-| --- | --- | ---: | ---: | --- | ---: | ---: |
-| DOCX | [0.1.0](https://www.npmjs.com/package/@betteroffice/docx/v/0.1.0) | 0.6487 | 64/64 | [5bed9528](https://github.com/openooxml/betteroffice/commit/5bed9528511ff4e834c3c68cdf3bea9e086609f9) | 0.7538 | 64/64 |
-| PPTX | [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) | 0.8478 | 9/9 | [a35d4baa](https://github.com/openooxml/betteroffice/commit/a35d4baa1f5415f557d7dc9bae179f159afd5591) | 0.8769 | 9/9 |
-| XLSX | [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) | 0.7163 | 4/8 | [a35d4baa](https://github.com/openooxml/betteroffice/commit/a35d4baa1f5415f557d7dc9bae179f159afd5591) | 0.7695 | 8/8 |
-
-SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
-
-<!-- END GENERATED VISUAL FIDELITY -->
 
 ## Contributing
 

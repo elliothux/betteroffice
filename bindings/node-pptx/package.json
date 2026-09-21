@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/pptx-native",
-  "version": "0.0.1",
+  "version": "0.1.1",
   "description": "Native Rust bindings for the BetterOffice PPTX engine in Node.js and Bun.",
   "main": "index.js",
   "types": "index.d.ts",
@@ -28,9 +28,9 @@
     "artifacts": "napi artifacts",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "prepublishOnly": "napi pre-publish --tag-style npm",
+    "prepublishOnly": "napi pre-publish --tag-style npm --no-gh-release",
     "test": "bun test",
-    "typecheck": "true"
+    "typecheck": "tsc --noEmit --types node --target es2022 --module nodenext index.d.ts"
   },
   "keywords": [
     "pptx",
@@ -54,5 +54,9 @@
     "access": "public",
     "provenance": true
   },
-  "type": "commonjs"
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "typescript": "^6.0.3"
+  }
 }

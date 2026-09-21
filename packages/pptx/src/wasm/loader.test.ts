@@ -73,6 +73,61 @@ test('proposals preview real frames, accept atomically, save, and preserve stale
 
 afterAll(() => handle.dispose());
 
+test('text search returns stable slide and story locations without mutating the deck', () => {
+  const source = openPresentation(fixture, { clientId: 9200 });
+  try {
+    const slide = source.snapshot().slides[0];
+    const receipt = source.addTextBox(slide.id, {
+      name: 'Search fixture',
+      text: 'QueryNeedle queryneedle QUERYNEEDLE',
+      rect: { x: 100000, y: 100000, width: 2000000, height: 500000 },
+      style: {},
+    });
+    const shape = source
+      .snapshot()
+      .slides[0].shapes.find((candidate) => candidate.id === receipt.shapeId)!;
+    const story = shape.textStories[0];
+    const stateWithFixture = source.encodeStateVector();
+
+    expect(source.searchText('queryneedle')).toEqual([
+      {
+        slideIndex: 0,
+        slideId: slide.id,
+        shapeId: shape.id,
+        storyId: story.id,
+        start: 0,
+        end: 11,
+        text: 'QueryNeedle',
+      },
+      {
+        slideIndex: 0,
+        slideId: slide.id,
+        shapeId: shape.id,
+        storyId: story.id,
+        start: 12,
+        end: 23,
+        text: 'queryneedle',
+      },
+      {
+        slideIndex: 0,
+        slideId: slide.id,
+        shapeId: shape.id,
+        storyId: story.id,
+        start: 24,
+        end: 35,
+        text: 'QUERYNEEDLE',
+      },
+    ]);
+    expect(source.searchText('QueryNeedle', { caseSensitive: true })).toHaveLength(1);
+    expect(source.searchText('queryneedle', { limit: 2 })).toHaveLength(2);
+    expect(source.searchText('')).toEqual([]);
+    expect(() => source.searchText('queryneedle', { limit: -1 })).toThrow(RangeError);
+    expect(source.encodeStateVector()).toEqual(stateWithFixture);
+  } finally {
+    source.dispose();
+  }
+});
+
 test('inline proposal diffs reflow and paint marked text without changing hit tests or saved text', async () => {
   const source = openPresentation(fixture, { clientId: 9203, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
   try {
@@ -602,3 +657,35 @@ function oneCallPerTextRun(
   }
   return calls;
 }
+
+test('inserted pictures render, synchronize, arrange and reopen with their bytes', () => {
+  const source = openPresentation(fixture, { clientId: 9401, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  const peer = openPresentation(fixture, { clientId: 9402, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]);
+  try {
+    const slide = source.snapshot().slides[0];
+    const added = source.addPicture(slide.id, {
+      name: 'Shared picture', rect: { x: 10, y: 20, width: 3000, height: 4000 },
+      contentType: 'image/png', mediaBase64: Buffer.from(bytes).toString('base64'),
+    });
+    const assetId = `pending-media:${added.shapeId}`;
+    expect(source.layoutSlide(0).primitives.some((p) => p.kind === 'image' && p.assetId === assetId)).toBe(true);
+    expect(source.mediaBytes(assetId)).toEqual(bytes);
+    peer.applyUpdate(source.encodeStateAsUpdate());
+    expect(peer.mediaBytes(assetId)).toEqual(bytes);
+    expect(peer.snapshot()).toEqual(source.snapshot());
+    source.sendShapeToBack(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes[0].id).toBe(added.shapeId);
+    source.bringShapeForward(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes[1].id).toBe(added.shapeId);
+    source.sendShapeBackward(slide.id, added.shapeId);
+    source.bringShapeToFront(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes.slice(-1)[0].id).toBe(added.shapeId);
+    const reopened = openPresentation(source.save(), { clientId: 9403 });
+    try {
+      const picture = reopened.snapshot().slides[0].shapes.slice(-1)[0];
+      expect(picture.name).toBe('Shared picture');
+      expect(reopened.mediaBytes(picture.mediaPartPath!)).toEqual(bytes);
+    } finally { reopened.dispose(); }
+  } finally { source.dispose(); peer.dispose(); }
+});

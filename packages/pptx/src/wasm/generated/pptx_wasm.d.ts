@@ -7,9 +7,12 @@ export class PptxDocument {
     [Symbol.dispose](): void;
     acceptProposalJson(args: string): string;
     addCommentJson(args: string): string;
+    addPictureJson(args: string): string;
     addShapeJson(args: string): string;
     addTextBoxJson(args: string): string;
     applyUpdateJson(update: Uint8Array): string;
+    bringShapeForwardJson(args: string): string;
+    bringShapeToFrontJson(args: string): string;
     canRedo(): boolean;
     canUndo(): boolean;
     clearUpdateObservation(): void;
@@ -48,6 +51,9 @@ export class PptxDocument {
      * Serializes the deck back to `.pptx` bytes, edits included.
      */
     saveBytes(): Uint8Array;
+    searchTextJson(args: string): string;
+    sendShapeBackwardJson(args: string): string;
+    sendShapeToBackJson(args: string): string;
     setCommentFlavorJson(args: string): string;
     setCommentStatusJson(args: string): string;
     setParagraphAlignmentJson(args: string): string;
@@ -77,6 +83,8 @@ export class PptxRenderer {
 
 export function compileSlideJson(slide_json: string): string;
 
+export function decodeTiffPng(data: Uint8Array): Uint8Array;
+
 export function parsePptxJson(data: Uint8Array): string;
 
 export function rendererVersion(): string;
@@ -87,6 +95,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_pptxrenderer_free: (a: number, b: number) => void;
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
+    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly parsePptxJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -98,9 +107,12 @@ export interface InitOutput {
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;
     readonly pptxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_addPictureJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_bringShapeForwardJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_bringShapeToFrontJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_canRedo: (a: number) => number;
     readonly pptxdocument_canUndo: (a: number) => number;
     readonly pptxdocument_clearUpdateObservation: (a: number) => void;
@@ -131,6 +143,9 @@ export interface InitOutput {
     readonly pptxdocument_replyToCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_saveBytes: (a: number) => [number, number, number, number];
+    readonly pptxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_sendShapeBackwardJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_sendShapeToBackJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentFlavorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setParagraphAlignmentJson: (a: number, b: number, c: number) => [number, number, number, number];

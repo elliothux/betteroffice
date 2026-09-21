@@ -92,6 +92,8 @@ fn content_type(format: Format) -> &'static str {
         Format::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         Format::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         Format::Pptx => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        Format::Vsdx => "application/vnd.ms-visio.drawing",
+        Format::Vstx => "application/vnd.ms-visio.template",
         Format::Auto => "application/octet-stream",
     }
 }
@@ -207,13 +209,43 @@ mod tests {
     }
 
     #[test]
-    fn refuses_visio_before_producing_uploadable_bytes() {
+    fn local_visio_redaction_uses_the_detected_extension_and_content_type() {
+        for (source, format, mime) in [
+            (
+                include_bytes!("../../../apps/demo/public/betteroffice-demo.vsdx").as_slice(),
+                Format::Vsdx,
+                "application/vnd.ms-visio.drawing",
+            ),
+            (
+                include_bytes!("../../vsdx-parse/tests/fixtures/template.vstx").as_slice(),
+                Format::Vstx,
+                "application/vnd.ms-visio.template",
+            ),
+        ] {
+            let redacted = redact_local(source).unwrap();
+            assert_eq!(redacted.format(), format);
+            assert_eq!(content_type(redacted.format()), mime);
+            assert_ne!(redacted.bytes(), source);
+            assert!(
+                ooxml_opc::sanitize_package_for_format(
+                    redacted.bytes(),
+                    format.extension().unwrap()
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_visio_without_package_metadata() {
         let source = ooxml_opc::rezip_parts(&[(
             "visio/document.xml".to_owned(),
             br#"<VisioDocument><CommentList><CommentEntry Author="PRIVATE_AUTHOR">PRIVATE_COMMENT</CommentEntry></CommentList></VisioDocument>"#.to_vec(),
         )]).unwrap();
-        let error = redact_local(&source).err().expect("Visio must be rejected");
-        assert!(error.contains("Visio redaction is not supported"));
+        let error = redact_local(&source)
+            .err()
+            .expect("missing package metadata must be rejected");
+        assert!(error.contains("unsupported or ambiguous Visio format"));
     }
 
     fn fixture() -> Vec<u8> {

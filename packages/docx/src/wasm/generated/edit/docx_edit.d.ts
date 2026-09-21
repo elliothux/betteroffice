@@ -527,6 +527,13 @@ export class EditSession {
      */
     register_measure_font(bytes: Uint8Array): number;
     /**
+     * Registers a measurement view of `base` carrying the vertical metrics
+     * and advance pitch Word measures `requested_family` with — for a face
+     * this host had to substitute. Returns `base` for a family whose metrics
+     * are unknown.
+     */
+    register_substitute_measure_font(base: number, requested_family: string): number;
+    /**
      * Rejects tracked changes — the inverse of
      * [`EditSession::accept_change`]: pending insertions roll back, pending
      * deletions restore their text; `pPrIns` marks join back with the
@@ -573,6 +580,7 @@ export class EditSession {
      * fallback after a retained-only region layout.
      */
     retained_kernel_inputs_json(): string;
+    search_text(query: string, case_sensitive: boolean, limit?: number | null): string;
     /**
      * [`EditSession::open_docx`] with seeding always on.
      */
@@ -839,6 +847,11 @@ export function clear_measure_fonts(): void;
 export function close_display_list(handle: number): void;
 
 /**
+ * Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
+ */
+export function decodeTiffPng(data: Uint8Array): Uint8Array;
+
+/**
  * wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
  * point in, document position (or `null`) as JSON out.
  */
@@ -988,6 +1001,16 @@ export function range_rects_region_json(display_list: string, region: string, pa
 export function register_measure_font(bytes: Uint8Array): number;
 
 /**
+ * Register a measurement view of `base` carrying the vertical metrics and
+ * advance pitch Word measures `requested_family` with, and return its id;
+ * returns `base` unchanged for a family with no known metrics. Hosts call
+ * this for a face they substituted, and put the result at the head of that
+ * family's chain. Pagination, the display list and glyph outlines all read
+ * this one store, so a widened view measures and paints at one pitch.
+ */
+export function register_substitute_measure_font(base: number, requested_family: string): number;
+
+/**
  * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
@@ -1092,6 +1115,7 @@ export interface InitOutput {
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
+    readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
@@ -1099,6 +1123,7 @@ export interface InitOutput {
     readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
+    readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_select_story: (a: number, b: number, c: number) => void;
     readonly editsession_selection: (a: number) => [number, number, number, number];
@@ -1129,6 +1154,7 @@ export interface InitOutput {
     readonly editsession_undo: (a: number) => number;
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
+    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];
@@ -1156,12 +1182,13 @@ export interface InitOutput {
     readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly register_measure_font: (a: number, b: number) => [number, number, number];
+    readonly register_substitute_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly clear_measure_fonts: () => void;
     readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
-    readonly clear_measure_fonts: () => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

@@ -6,6 +6,7 @@ use crate::mask::{TextMasker, placeholder};
 use crate::rels::{self, attribute_local, is_unqualified};
 use crate::schema;
 use crate::styles::StyleMap;
+use crate::visio;
 use crate::{Format, RedactError, RedactionReport};
 
 #[cfg(test)]
@@ -45,6 +46,7 @@ pub(crate) fn redact_xml_with_styles(
         current_style: None,
         cell_type: None,
         custom_property: 0,
+        visio_sections: Vec::new(),
         masker,
     };
     let mut skipped_depth = 0;
@@ -91,7 +93,7 @@ pub(crate) fn redact_xml_with_styles(
             && let Some(value) = fixed_metadata_value(path, &reader, start.name())
         {
             let local = local_name(start.local_name().as_ref());
-            let rewritten = rewrite_start(&reader, start.to_owned(), &local, &mut state)?;
+            let rewritten = rewrite_start(&reader, start.to_owned(), &local, &mut state, true)?;
             writer
                 .write_event(Event::Start(rewritten.borrow()))
                 .map_err(|error| xml_error(path, error))?;
@@ -115,7 +117,7 @@ pub(crate) fn redact_xml_with_styles(
                     skipped_depth = 1;
                     continue;
                 }
-                let rewritten = rewrite_start(&reader, start, &local, &mut state)?;
+                let rewritten = rewrite_start(&reader, start, &local, &mut state, false)?;
                 stack.push(local);
                 writer
                     .write_event(Event::Start(rewritten))
@@ -127,7 +129,7 @@ pub(crate) fn redact_xml_with_styles(
                     continue;
                 }
                 let empty_style = local == "style" && word_node(&reader, start.name());
-                let rewritten = rewrite_start(&reader, start, &local, &mut state)?;
+                let rewritten = rewrite_start(&reader, start, &local, &mut state, true)?;
                 if empty_style {
                     state.current_style = None;
                 }
@@ -143,6 +145,14 @@ pub(crate) fn redact_xml_with_styles(
                     && word_node(&reader, end.name())
                 {
                     state.current_style = None;
+                }
+                if visio::is_visio(format)
+                    && local_name(end.name().local_name().as_ref()) == "Section"
+                    && matches!(reader.resolver().resolve_element(end.name()).0,
+                        ResolveResult::Bound(ns) if ns.as_ref() == visio::NAMESPACE)
+                    && state.visio_sections.pop().is_none()
+                {
+                    return Err(visio::ambiguous(path, "unbalanced Section end"));
                 }
                 stack.pop();
                 writer
@@ -244,6 +254,7 @@ struct RewriteState<'a> {
     current_style: Option<String>,
     cell_type: Option<String>,
     custom_property: usize,
+    visio_sections: Vec<Option<String>>,
     masker: &'a mut TextMasker,
 }
 
@@ -252,6 +263,7 @@ fn rewrite_start(
     start: BytesStart<'_>,
     element: &str,
     state: &mut RewriteState<'_>,
+    is_empty: bool,
 ) -> Result<BytesStart<'static>, RedactError> {
     let format = state.format;
     let path = state.path;
@@ -288,6 +300,28 @@ fn rewrite_start(
             .map(|(_, value)| value.clone());
     }
 
+    let visio_active = visio::is_visio(format);
+    let visio_node = matches!(reader.resolver().resolve_element(start.name()).0,
+        ResolveResult::Bound(ns) if ns.as_ref() == visio::NAMESPACE);
+    let drawingml_node = matches!(reader.resolver().resolve_element(start.name()).0,
+        ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+            b"http://schemas.openxmlformats.org/drawingml/2006/main" | b"http://purl.oclc.org/ooxml/drawingml/main"));
+    if visio_active && visio_node && element == "Section" {
+        if !state.visio_sections.is_empty() {
+            return Err(visio::ambiguous(path, "nested Section"));
+        }
+        if !is_empty {
+            state
+                .visio_sections
+                .push(visio::attribute_named(&attributes, "N"));
+        }
+    }
+    let visio_section = state
+        .visio_sections
+        .last()
+        .map(|name| name.as_deref().unwrap_or(""));
+    let visio_cell = visio::attribute_named(&attributes, "N");
+    let visio_cached = visio::attribute_named(&attributes, "V");
     let (relationship, external) = relationship_mode(path, element, &attributes);
     let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
@@ -355,6 +389,56 @@ fn rewrite_start(
                     }
                     .to_owned(),
                 )
+            } else if visio_active
+                && visio::package_plumbing(path)
+                && key != "xmlns"
+                && !key.starts_with("xmlns:")
+            {
+                if visio::preserve_package_attribute(element, &key) {
+                    None
+                } else {
+                    Some(state.masker.replace(&value)?)
+                }
+            } else if visio_active
+                && !visio::package_plumbing(path)
+                && key != "xmlns"
+                && !key.starts_with("xmlns:")
+            {
+                let is_relationship = matches!(
+                    reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+                    ResolveResult::Bound(ns) if visio::relationship_namespace(ns.as_ref())
+                );
+                let preserve = if visio_node {
+                    visio::preserve_attribute(
+                        element,
+                        &key,
+                        &value,
+                        visio_section,
+                        visio_cell.as_deref(),
+                        is_relationship,
+                    )
+                } else {
+                    visio::preserve_other_attribute(
+                        element,
+                        &key,
+                        &value,
+                        drawingml_node,
+                        is_relationship,
+                    )
+                };
+                if preserve {
+                    None
+                } else {
+                    Some(if visio_node && element == "Cell" && key == "F" {
+                        visio::cached_formula(
+                            visio_cell.as_deref(),
+                            visio_section,
+                            visio_cached.as_deref(),
+                        )
+                    } else {
+                        visio::redacted_value(element, &key, &value, state.masker)?
+                    })
+                }
             } else if !key.starts_with("xmlns")
                 && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
                 && let Some(kind) = sensitive_attribute_kind(format, path, element, local, &value)
@@ -477,6 +561,34 @@ fn replacement_kind(
 ) -> Option<Replacement> {
     let element = stack.last().map(String::as_str)?;
     let lower = path.to_ascii_lowercase();
+    if visio::is_visio(format) {
+        return Some(match (lower.as_str(), element) {
+            ("docprops/core.xml", "created" | "modified" | "lastPrinted")
+            | ("docprops/custom.xml", "date" | "filetime") => Replacement::Date,
+            ("docprops/core.xml", "revision")
+            | (
+                "docprops/app.xml",
+                "TotalTime"
+                | "Pages"
+                | "Words"
+                | "Characters"
+                | "CharactersWithSpaces"
+                | "Lines"
+                | "Paragraphs"
+                | "Slides"
+                | "Notes"
+                | "HiddenSlides"
+                | "MMClips"
+                | "DocSecurity",
+            ) => Replacement::Number,
+            ("docprops/custom.xml", "bool")
+            | (
+                "docprops/app.xml",
+                "ScaleCrop" | "LinksUpToDate" | "SharedDoc" | "HyperlinksChanged",
+            ) => Replacement::Boolean,
+            _ => Replacement::Text,
+        });
+    }
     if lower.ends_with(".rels") {
         return None;
     }
@@ -551,6 +663,7 @@ fn replacement_kind(
             "v" => Some(Replacement::Number),
             _ => None,
         },
+        Format::Vsdx | Format::Vstx => Some(Replacement::Text),
         Format::Auto => None,
     }
 }
@@ -689,7 +802,7 @@ fn sensitive_attribute_kind(
             || element == "tag" && matches!(attribute, "name" | "val")
             || element == "custShow" && attribute == "name")
             .then_some(Replacement::Text),
-        Format::Auto => None,
+        Format::Vsdx | Format::Vstx | Format::Auto => None,
     }
 }
 

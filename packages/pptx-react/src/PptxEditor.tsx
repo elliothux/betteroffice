@@ -108,13 +108,27 @@ export interface PptxTextSelection {
   focusLine?: number;
 }
 
+export interface PptxTextSelectionTarget {
+  /** 1-based slide number. */
+  slide: number;
+  shapeId: string;
+  storyId: string;
+  start: number;
+  end: number;
+}
+
 export interface PptxEditorApi {
+  clearSelection: () => void;
   focus: () => void;
+  /** Accepts a 1-based slide number. */
+  goToSlide: (slide: number) => boolean;
   handle: PresentationHandle;
   refresh: () => void;
   refreshProposals: () => void;
   /** Serialize the presentation back to .pptx bytes, edits included. */
   save: () => Uint8Array;
+  /** Also navigates to the slide. */
+  selectText: (target: PptxTextSelectionTarget) => boolean;
 }
 
 export interface PptxEditorCollaborationOptions {
@@ -134,11 +148,15 @@ export interface PptxEditorProps {
   className?: string;
   /** Download name for the save button; falls back to `presentation.pptx`. */
   fileName?: string;
+  /** 1-based; clamped to the deck. */
+  initialSlide?: number;
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
   onError?: (error: Error) => void;
   /** Receives the saved bytes; without it, saving downloads the file. */
   onSave?: (bytes: Uint8Array) => void;
+  /** Blocks user edits; navigation and selection remain available. */
+  readOnly?: boolean;
 }
 
 interface EditorModel {
@@ -247,6 +265,32 @@ function downloadBytes(bytes: Uint8Array, name: string, mime: string): void {
   URL.revokeObjectURL(url);
 }
 
+/** Reads a file as a `data:` URL, e.g. for handing an image to `<img>`/`Image`. */
+function readFileAsDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error('failed to read the file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** The pixel size a `data:` image URL decodes to. */
+function loadImageSize(dataUrl: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    image.onerror = () => reject(new Error('failed to decode the image'));
+    image.src = dataUrl;
+  });
+}
+
+const MAX_INSERT_IMAGE_BYTES = 8 * 1024 * 1024;
+const INSERT_IMAGE_TYPES: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff', webp: 'image/webp', svg: 'image/svg+xml',
+};
+
 /** Windows/Office caret phase. */
 const CARET_BLINK_MS = 530;
 
@@ -280,10 +324,12 @@ function PptxEditorContent({
   collaboration,
   className,
   fileName,
+  initialSlide,
   onReady,
   onChange,
   onError,
   onSave,
+  readOnly = false,
 }: Omit<PptxEditorProps, 'i18n'>) {
   const { t } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
@@ -293,12 +339,14 @@ function PptxEditorContent({
   const collaborationPresence = collaboration?.presence;
   const handleRef = useRef<PresentationHandle | null>(null);
   const modelRef = useRef<EditorModel | null>(null);
+  const initialSlideRef = useRef(initialSlide);
   const onReadyRef = useRef(onReady);
   const onChangeRef = useRef(onChange);
   const onErrorRef = useRef(onError);
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const pictureInputRef = useRef<HTMLInputElement>(null);
   const [stageFocused, setStageFocused] = useState(false);
   const caretGoalRef = useRef<{
     shapeId: string;
@@ -339,7 +387,12 @@ function PptxEditorContent({
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsOpen, setProposalsOpen] = useState(false);
   const proposalButtonRef = useRef<HTMLButtonElement>(null);
-  const canvasReview = useProposalCanvas(handleRef.current, proposals, model?.snapshot, model?.slideIndex ?? 0);
+  const canvasReview = useProposalCanvas(
+    handleRef.current,
+    readOnly ? [] : proposals,
+    model?.snapshot,
+    model?.slideIndex ?? 0
+  );
   const [paintedReview, setPaintedReview] = useState<ProposalDiffSlide | null>(null);
   const resolveProposalImage = useCallback((assetId: string) =>
     resolveImage(assetId, handleRef, imageCacheRef, decodeImageError), [decodeImageError]);
@@ -355,10 +408,25 @@ function PptxEditorContent({
     setTextBoxPreview(null);
   }, [canvasReview.reviewing]);
 
+  useEffect(() => {
+    if (!readOnly) return;
+    setActiveTool('select');
+    setProposalsOpen(false);
+    pointerGestureRef.current = null;
+    resizeRef.current = null;
+    recentClickRef.current = null;
+    setResizeDelta(null);
+    setDragPreview(null);
+    setTextBoxPreview(null);
+  }, [readOnly]);
+
   onReadyRef.current = onReady;
+  initialSlideRef.current = initialSlide;
   onChangeRef.current = onChange;
   onErrorRef.current = onError;
   modelRef.current = model;
+  const imageInsertAllowedRef = useRef(false);
+  imageInsertAllowedRef.current = !readOnly && !canvasReview.reviewing;
 
   const reportError = useCallback((value: unknown) => {
     const next = value instanceof Error ? value : new Error(String(value));
@@ -436,6 +504,75 @@ function PptxEditorContent({
     refreshAt(undefined, false, true);
   }, [refreshAt]);
 
+  const clearSelection = useCallback(() => {
+    caretGoalRef.current = null;
+    resizeRef.current = null;
+    pointerGestureRef.current = null;
+    recentClickRef.current = null;
+    setResizeDelta(null);
+    setSelection(null);
+    setShapeSelection(null);
+    setDragPreview(null);
+    setTextBoxPreview(null);
+  }, []);
+
+  const goToSlide = useCallback(
+    (slide: number): boolean => {
+      const current = modelRef.current;
+      if (
+        !current ||
+        !Number.isInteger(slide) ||
+        slide < 1 ||
+        slide > current.snapshot.slides.length
+      ) {
+        return false;
+      }
+      clearSelection();
+      if (!refreshAt(slide - 1)) return false;
+      stageRef.current?.focus();
+      return true;
+    },
+    [clearSelection, refreshAt]
+  );
+
+  const selectText = useCallback(
+    (target: PptxTextSelectionTarget): boolean => {
+      const handle = handleRef.current;
+      const current = modelRef.current;
+      if (
+        !handle ||
+        !current ||
+        !Number.isInteger(target.slide) ||
+        !Number.isInteger(target.start) ||
+        !Number.isInteger(target.end) ||
+        target.start < 0 ||
+        target.end < target.start
+      ) {
+        return false;
+      }
+      const slide = current.snapshot.slides[target.slide - 1];
+      const shape = slide ? findShape(slide.shapes, target.shapeId) : null;
+      if (!shape?.textStories.some((story) => story.id === target.storyId)) return false;
+      try {
+        const story = handle.story(target.storyId);
+        if (target.end > story.length) return false;
+        clearSelection();
+        if (!refreshAt(target.slide - 1)) return false;
+        setSelection({
+          shapeId: target.shapeId,
+          storyId: target.storyId,
+          anchor: target.start,
+          focus: target.end,
+        });
+        stageRef.current?.focus();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [clearSelection, refreshAt]
+  );
+
   const navigateProposalTarget = useCallback((slideId: string, shapeId: string | null, proposalId?: string) => {
     const index = modelRef.current?.snapshot.slides.findIndex((slide) => slide.id === slideId) ?? -1;
     if (index < 0) return;
@@ -456,6 +593,7 @@ function PptxEditorContent({
   }, [reportError]);
 
   const acceptProposal = useCallback((id: string, force = false) => {
+    if (readOnly) return;
     try {
       handleRef.current?.acceptProposal(id, { force });
       refreshAt(undefined, true, true);
@@ -463,16 +601,17 @@ function PptxEditorContent({
       refreshProposals();
       if (!(value instanceof StaleProposalError)) reportError(value);
     }
-  }, [refreshAt, refreshProposals, reportError]);
+  }, [readOnly, refreshAt, refreshProposals, reportError]);
 
   const rejectProposal = useCallback((id: string) => {
+    if (readOnly) return;
     try {
       handleRef.current?.rejectProposal(id);
       refreshProposals();
     } catch (value) {
       reportError(value);
     }
-  }, [refreshProposals, reportError]);
+  }, [readOnly, refreshProposals, reportError]);
 
   useEffect(() => {
     let disposed = false;
@@ -519,15 +658,23 @@ function PptxEditorContent({
           unsubscribeUpdates = handle.onUpdate((_update, origin) => {
             if (origin === 'remote') refreshAt(undefined, true, true);
           });
-          refreshAt(0);
+          const requestedSlide = initialSlideRef.current;
+          refreshAt(
+            typeof requestedSlide === 'number' && Number.isInteger(requestedSlide)
+              ? requestedSlide - 1
+              : 0
+          );
           setLoading(false);
           setCollaborationReplica(handle);
           const opened = handle;
           onReadyRef.current?.({
+            clearSelection,
+            goToSlide,
             handle: opened,
             refresh,
             refreshProposals,
             save: () => opened.save(),
+            selectText,
             focus: () => stageRef.current?.focus(),
           });
         } catch (value) {
@@ -551,11 +698,14 @@ function PptxEditorContent({
   }, [
     collaborationClientId,
     collaborationInitialUpdate,
+    clearSelection,
     file,
+    goToSlide,
     stableFonts,
     refresh,
     refreshAt,
     reportError,
+    selectText,
   ]);
 
   useEffect(() => {
@@ -769,23 +919,13 @@ function PptxEditorContent({
   }, [model?.snapshot]);
 
   const selectSlide = (index: number) => {
-    caretGoalRef.current = null;
-    resizeRef.current = null;
-    setResizeDelta(null);
-    setSelection(null);
-    setShapeSelection(null);
-    setDragPreview(null);
-    setTextBoxPreview(null);
-    pointerGestureRef.current = null;
-    recentClickRef.current = null;
-    refreshAt(index);
-    stageRef.current?.focus();
+    goToSlide(index + 1);
   };
 
   const createTextBox = (start: SlidePoint, end: SlidePoint) => {
     const handle = handleRef.current;
     const current = modelRef.current;
-    if (!handle || !current?.frame) return;
+    if (!handle || !current?.frame || readOnly) return;
     const slide = current.snapshot.slides[current.slideIndex];
     if (!slide) return;
     const dragged = Math.abs(end.x - start.x) >= 6 || Math.abs(end.y - start.y) >= 6;
@@ -854,7 +994,7 @@ function PptxEditorContent({
   ) => {
     const handle = handleRef.current;
     const current = modelRef.current;
-    if (!handle || !current?.frame) return;
+    if (!handle || !current?.frame || readOnly) return;
     const slide = current.snapshot.slides[current.slideIndex];
     const preset = SHAPE_PRESETS.find((candidate) => candidate.geometry === geometry);
     if (!slide || !preset) return;
@@ -905,6 +1045,65 @@ function PptxEditorContent({
     }
   };
 
+  const insertPicture = async (file: File) => {
+    const handle = handleRef.current;
+    if (!handle || !imageInsertAllowedRef.current) return;
+    try {
+      if (file.size > MAX_INSERT_IMAGE_BYTES) {
+        throw new Error(
+          `image is ${file.size} bytes, exceeds the ${MAX_INSERT_IMAGE_BYTES}-byte limit`
+        );
+      }
+      const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+      const contentType = file.type === 'image/jpg' ? 'image/jpeg' : file.type || INSERT_IMAGE_TYPES[extension];
+      if (!Object.values(INSERT_IMAGE_TYPES).includes(contentType)) {
+        throw new Error(`unsupported image type ${file.type || extension}`);
+      }
+      const dataUrl = await readFileAsDataUrl(file);
+      const mediaBase64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      let previewUrl = `data:${contentType};base64,${mediaBase64}`;
+      if (contentType === 'image/tiff') {
+        const bytes = Uint8Array.from(atob(mediaBase64), (char) => char.charCodeAt(0));
+        previewUrl = await readFileAsDataUrl(presentationImageBlob(bytes));
+      }
+      const natural = await loadImageSize(previewUrl);
+      const current = modelRef.current;
+      if (handleRef.current !== handle || !imageInsertAllowedRef.current || !current?.frame) return;
+      if (natural.width <= 0 || natural.height <= 0) throw new Error('image dimensions must be positive');
+      const slide = current.snapshot.slides[current.slideIndex];
+      if (!slide) return;
+      const maxWidth = current.frame.width * 0.5;
+      const maxHeight = current.frame.height * 0.5;
+      const scale = Math.min(maxWidth / natural.width, maxHeight / natural.height, 1);
+      const width = Math.max(1, natural.width * scale);
+      const height = Math.max(1, natural.height * scale);
+      const x = (current.frame.width - width) / 2;
+      const y = (current.frame.height - height) / 2;
+      const receipt = handle.addPicture(slide.id, {
+        name: file.name || t('objects.defaultPictureName'),
+        rect: {
+          x: Math.round((x * current.snapshot.widthEmu) / current.frame.width),
+          y: Math.round((y * current.snapshot.heightEmu) / current.frame.height),
+          width: Math.round((width * current.snapshot.widthEmu) / current.frame.width),
+          height: Math.round((height * current.snapshot.heightEmu) / current.frame.height),
+        },
+        contentType,
+        mediaBase64,
+      });
+      const next = refreshAt(undefined, true);
+      setActiveTool('select');
+      setSelection(null);
+      setShapeSelection({ slideId: slide.id, shapeId: receipt.shapeId });
+      setDragPreview(null);
+      setTextBoxPreview(null);
+      pointerGestureRef.current = null;
+      recentClickRef.current = null;
+      if (next) stageRef.current?.focus();
+    } catch (value) {
+      if (handleRef.current === handle && imageInsertAllowedRef.current) reportError(value);
+    }
+  };
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     if (!event.isPrimary || event.button !== 0) return;
     const handle = handleRef.current;
@@ -922,7 +1121,7 @@ function PptxEditorContent({
     setResizeDelta(null);
     const slide = current.snapshot.slides[current.slideIndex];
     const shapePreset = shapePresetFromTool(activeTool);
-    if ((activeTool === 'textBox' || shapePreset) && slide) {
+    if (!readOnly && (activeTool === 'textBox' || shapePreset) && slide) {
       setSelection(null);
       setShapeSelection(null);
       setDragPreview(null);
@@ -1054,7 +1253,7 @@ function PptxEditorContent({
           setSelection(null);
           setShapeSelection({ slideId: slide.id, shapeId: shape.id });
           setDragPreview(null);
-          if (canMoveShape(shape)) {
+          if (!readOnly && canMoveShape(shape)) {
             pointerGestureRef.current = {
               kind: 'shape',
               pointerId: event.pointerId,
@@ -1242,7 +1441,7 @@ function PptxEditorContent({
     const handle = handleRef.current;
     const current = modelRef.current;
     const slide = current?.snapshot.slides[current.slideIndex];
-    if (!handle || !current?.frame || slide?.id !== gesture.slideId) return;
+    if (!handle || !current?.frame || slide?.id !== gesture.slideId || readOnly) return;
     const shape = findShape(slide.shapes, gesture.shapeId);
     if (!shape) return;
     try {
@@ -1270,6 +1469,7 @@ function PptxEditorContent({
   };
 
   const commit = (nextSelection: PptxTextSelection | null) => {
+    if (readOnly) return;
     setSelection(nextSelection ? { ...nextSelection, focusLine: undefined } : null);
     setShapeSelection(null);
     recentClickRef.current = null;
@@ -1290,7 +1490,7 @@ function PptxEditorContent({
       event.preventDefault();
       return;
     }
-    if (modifier && (event.key === 'z' || event.key === 'Z')) {
+    if (!readOnly && modifier && (event.key === 'z' || event.key === 'Z')) {
       event.preventDefault();
       history(event.shiftKey ? 'redo' : 'undo');
       return;
@@ -1302,21 +1502,21 @@ function PptxEditorContent({
     }
     if (canvasReview.reviewing) return;
     if (!selection && !selectedShapeStoryId) return;
-    if (modifier && (event.key === 'b' || event.key === 'B')) {
+    if (!readOnly && modifier && (event.key === 'b' || event.key === 'B')) {
       event.preventDefault();
       applyFormatting({
         bold: selection ? !textStyle.bold : !selectionFormatting.bold,
       });
       return;
     }
-    if (modifier && (event.key === 'i' || event.key === 'I')) {
+    if (!readOnly && modifier && (event.key === 'i' || event.key === 'I')) {
       event.preventDefault();
       applyFormatting({
         italic: selection ? !textStyle.italic : !selectionFormatting.italic,
       });
       return;
     }
-    if (modifier && (event.key === 'u' || event.key === 'U')) {
+    if (!readOnly && modifier && (event.key === 'u' || event.key === 'U')) {
       event.preventDefault();
       applyFormatting({
         underline: selection
@@ -1344,6 +1544,7 @@ function PptxEditorContent({
         });
         return;
       }
+      if (readOnly) return;
       if (event.key === 'Backspace') {
         event.preventDefault();
         if (start !== end) {
@@ -1398,6 +1599,7 @@ function PptxEditorContent({
   };
 
   const applyFormatting = (patch: TextStylePatch) => {
+    if (readOnly) return;
     setTextStyle((current) => ({ ...current, ...patch }));
     const handle = handleRef.current;
     if (!handle) return;
@@ -1491,7 +1693,7 @@ function PptxEditorContent({
   const applyAlignment = (alignment: ParagraphAlignment) => {
     const handle = handleRef.current;
     const storyId = selection?.storyId ?? selectedShapeStoryId;
-    if (!handle || !storyId) return;
+    if (!handle || !storyId || readOnly) return;
     try {
       if (selection) {
         handle.setParagraphAlignment(
@@ -1529,7 +1731,7 @@ function PptxEditorContent({
 
   const formatShape = (action: ShapeFormattingAction) => {
     const handle = handleRef.current;
-    if (!handle || !shapeSelection || !selectedShape) return;
+    if (!handle || !shapeSelection || !selectedShape || readOnly) return;
     try {
       if (action.type === 'fillColor') {
         handle.setShapeFill(shapeSelection.slideId, shapeSelection.shapeId, action.value);
@@ -1545,11 +1747,19 @@ function PptxEditorContent({
           shapeSelection.shapeId,
           action.value === null ? {} : { widthPt: action.value }
         );
-      } else {
+      } else if (action.type === 'adjust') {
         handle.setShapeAdjust(shapeSelection.slideId, shapeSelection.shapeId, {
           ...selectedShape.adjustValues,
           [action.name]: action.value,
         });
+      } else if (action.type === 'zOrder') {
+        const zOrder = {
+          front: handle.bringShapeToFront,
+          back: handle.sendShapeToBack,
+          forward: handle.bringShapeForward,
+          backward: handle.sendShapeBackward,
+        }[action.value];
+        zOrder(shapeSelection.slideId, shapeSelection.shapeId);
       }
       refreshAt(undefined, true);
     } catch (value) {
@@ -1560,7 +1770,7 @@ function PptxEditorContent({
   const addSlide = (layoutPartPath?: string | null) => {
     const handle = handleRef.current;
     const current = modelRef.current;
-    if (!handle || !current) return;
+    if (!handle || !current || readOnly) return;
     try {
       const index = current.slideIndex + 1;
       const layout =
@@ -1585,7 +1795,7 @@ function PptxEditorContent({
 
   const history = (direction: 'undo' | 'redo') => {
     const handle = handleRef.current;
-    if (!handle) return;
+    if (!handle || readOnly) return;
     try {
       if (direction === 'undo') handle.undo();
       else handle.redo();
@@ -1624,7 +1834,7 @@ function PptxEditorContent({
 
   const resizePointerDown =
     (handle: ResizeHandle) => (event: PointerEvent<HTMLSpanElement>) => {
-      if (!shapeSelection || !selectedShape || !canResizeShape(selectedShape)) return;
+      if (readOnly || !shapeSelection || !selectedShape || !canResizeShape(selectedShape)) return;
       const point = slidePointFromClient(event.clientX, event.clientY);
       if (!point) return;
       event.preventDefault();
@@ -1686,6 +1896,7 @@ function PptxEditorContent({
     const slide = current?.snapshot.slides[current.slideIndex];
     const shape = slide && gesture ? findShape(slide.shapes, gesture.shapeId) : null;
     if (
+      readOnly ||
       !gesture ||
       !delta ||
       !api ||
@@ -1778,14 +1989,17 @@ function PptxEditorContent({
   return (
     <div className={className} style={styles.root}>
       <div style={styles.toolbarShell}>
+        {!readOnly && (
         <EditorToolbar
           currentFormatting={{ ...selectionFormatting, align: selectionAlignment }}
           textSelectionActive={!canvasReview.reviewing && (selection !== null || selectedShapeStoryId !== null)}
           onFormat={formatSelection}
           currentShapeFormatting={selectedShapeFormatting}
           shapeSelectionActive={!canvasReview.reviewing && selectedShape?.kind === 'shape'}
+          shapeArrangeActive={!canvasReview.reviewing && Boolean(selectedShape)}
           onShapeFormat={formatShape}
           onInsertSlide={addSlide}
+          onInsertImage={canvasReview.reviewing ? undefined : () => pictureInputRef.current?.click()}
           slideLayouts={slideLayouts}
           currentLayoutPartPath={model?.snapshot.slides[currentSlide]?.layoutPartPath}
           onSave={save}
@@ -1815,7 +2029,8 @@ function PptxEditorContent({
         >
           <EditorToolbar.Toolbar />
         </EditorToolbar>
-        {handleRef.current?.isProposalsAvailable() && (
+        )}
+        {!readOnly && handleRef.current?.isProposalsAvailable() && (
           <button ref={proposalButtonRef} type="button" data-testid="pptx-proposals-button"
             aria-expanded={proposalsOpen} style={styles.presentButton}
             onClick={() => { refreshProposals(); setProposalsOpen((open) => !open); }}>
@@ -1850,6 +2065,21 @@ function PptxEditorContent({
             ) : null}
           </div>
         ) : null}
+        <input
+          ref={pictureInputRef}
+          type="file"
+          accept={Object.values(INSERT_IMAGE_TYPES).join(',')}
+          disabled={readOnly || canvasReview.reviewing}
+          tabIndex={-1}
+          aria-hidden="true"
+          data-testid="pptx-insert-image-input"
+          style={styles.hiddenFileInput}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = '';
+            if (file) void insertPicture(file);
+          }}
+        />
         <button
           type="button"
           onClick={startPresenting}
@@ -1925,8 +2155,10 @@ function PptxEditorContent({
           onFocus={() => setStageFocused(true)}
           onBlur={() => setStageFocused(false)}
         >
-          <ProposalCanvasToolbar review={canvasReview} ready={paintedReview === canvasReview.diff} onAccept={acceptProposal} onReject={rejectProposal}
-            onDetails={() => setProposalsOpen(true)} />
+          {!readOnly && (
+            <ProposalCanvasToolbar review={canvasReview} ready={paintedReview === canvasReview.diff} onAccept={acceptProposal} onReject={rejectProposal}
+              onDetails={() => setProposalsOpen(true)} />
+          )}
           <div ref={canvasHostRef} style={styles.canvasHost}>
             {model?.frame ? (
               <div
@@ -2006,7 +2238,7 @@ function PptxEditorContent({
                       }}
                       aria-hidden="true"
                     />
-                    {selectedShape && canResizeShape(selectedShape)
+                    {!readOnly && selectedShape && canResizeShape(selectedShape)
                       ? RESIZE_HANDLES.map((handle) => {
                           const anchor = handleAnchor(selectionBox, handle);
                           return (
@@ -2081,7 +2313,7 @@ function PptxEditorContent({
           </div>
           {error ? <div style={styles.error}>{error}</div> : null}
         </div>
-        {proposalsOpen && model && handleRef.current && (
+        {!readOnly && proposalsOpen && model && handleRef.current && (
           <ProposalsPanel handle={handleRef.current} proposals={proposals} snapshot={model.snapshot}
             resolveImage={(assetId) => resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)}
             onAccept={acceptProposal} onReject={rejectProposal}
@@ -2095,12 +2327,12 @@ function PptxEditorContent({
         <NotesPanel
           key={activeSlide.id}
           value={activeSlide.notes ?? ''}
-          disabled={!model || canvasReview.reviewing}
+          disabled={!model || canvasReview.reviewing || readOnly}
           label={t('notes.panelLabel')}
           placeholder={t('notes.placeholder')}
           onCommit={(text) => {
             const handle = handleRef.current;
-            if (!handle) return;
+            if (!handle || readOnly) return;
             try {
               handle.setSlideNotes(activeSlide.id, text);
               refreshAt(undefined, true);
@@ -2699,6 +2931,17 @@ const styles: Record<string, CSSProperties> = {
   },
   empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },
+  hiddenFileInput: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    padding: 0,
+    margin: -1,
+    overflow: 'hidden',
+    clip: 'rect(0, 0, 0, 0)',
+    whiteSpace: 'nowrap',
+    border: 0,
+  },
   presentButton: {
     display: 'inline-flex',
     alignItems: 'center',

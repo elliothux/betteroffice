@@ -20,6 +20,8 @@ export interface TextStyleSnapshot {
   underline: string | null;
   spacingPt?: number | null;
   baselinePct?: number | null;
+  /** `a:rPr@cap`: how the run is cased when drawn, never in the stored text. */
+  caps?: 'none' | 'small' | 'all' | null;
 }
 
 export interface TextRunSnapshot {
@@ -42,6 +44,24 @@ export interface StorySnapshot {
   id: string;
   length: number;
   paragraphs: ParagraphSnapshot[];
+}
+
+export interface PptxTextSearchOptions {
+  /** Defaults to false. */
+  caseSensitive?: boolean;
+  /** Maximum matches; unlimited by default. */
+  limit?: number;
+}
+
+/** Zero-based slide index; story-local UTF-16 offsets. */
+export interface PptxTextMatch {
+  slideIndex: number;
+  slideId: string;
+  shapeId: string;
+  storyId: string;
+  start: number;
+  end: number;
+  text: string;
 }
 
 export type ShapeKind = 'shape' | 'picture' | 'graphicFrame' | 'group';
@@ -96,6 +116,8 @@ export interface ShapeSnapshot {
   outline: ShapeOutline | null;
   resolvedOutlineColor: string | null;
   mediaPartPath: string | null;
+  /** Image data added to this session, retained across saves. */
+  pendingMedia?: { contentType: string; base64: string } | null;
   blipEffects?: BlipEffect[];
   graphic: unknown | null;
   textStories: StorySnapshot[];
@@ -156,6 +178,13 @@ export interface ShapeReceipt {
   index: number;
 }
 
+export interface ShapeZOrderReceipt {
+  slideId: string;
+  shapeId: string;
+  fromIndex: number;
+  toIndex: number;
+}
+
 export interface ShapeRect {
   x: number;
   y: number;
@@ -189,6 +218,15 @@ export interface PresetShapeDraft {
   geometry: string;
   rect: ShapeRect;
   fill?: string | null;
+}
+
+export interface PictureDraft {
+  name: string;
+  rect: ShapeRect;
+  /** The image's MIME type, e.g. `image/png`. */
+  contentType: string;
+  /** The image bytes, base64-encoded. */
+  mediaBase64: string;
 }
 
 export interface ShapeStroke {
@@ -265,12 +303,14 @@ export interface Stroke {
   width: number;
   dashed?: boolean;
   paint?: Paint;
+  join?: 'round' | 'bevel' | 'miter';
   headEnd?: StrokeEnd;
   tailEnd?: StrokeEnd;
 }
 
 /** An `a:outerShdw`: a blurred copy of the shape's own path, offset and tinted. */
 export interface Shadow {
+  paths?: Array<{ path: GeometryPathCommand[]; fill: boolean; stroke?: Stroke }>;
   color: string;
   blur?: number;
   dx?: number;
@@ -300,6 +340,8 @@ export interface ShapePrimitive extends PrimitiveBase {
   name: string;
   geometry: string;
   path: GeometryPathCommand[];
+  /** An unsupported outline or clip was replaced by a rectangle. */
+  geometryFallback?: boolean;
   clip?: GeometryPathCommand[];
   evenOdd?: boolean;
   adjustValues?: Record<string, number>;
@@ -332,6 +374,8 @@ export interface ImagePrimitive extends PrimitiveBase {
   crop?: ImageCrop;
   /** Outline the picture is masked to, when its `spPr` gives it one. */
   path?: GeometryPathCommand[];
+  /** The authored mask is unsupported and uses a rectangle fallback. */
+  geometryFallback?: boolean;
   stroke?: Stroke;
   shadow?: Shadow;
 }

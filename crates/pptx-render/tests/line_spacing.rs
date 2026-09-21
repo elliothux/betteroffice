@@ -97,8 +97,11 @@ fn fixture_spacing_cascades_from_master_layout_and_shape_lists() {
         );
         assert_eq!(lines[0].runs[0].color, "#2040B0");
     }
+    // 300px shape top + (1854 + 67) / 2048 em of Arial at 32pt. PowerPoint
+    // 16.113 puts this baseline at ~341.4px, so the hhea ascent is closer than
+    // the usWin ascent it replaced (338.625) but still not PowerPoint's own.
     for id in [5, 6] {
-        assert!((lines(&list, id)[0].baseline - 338.625).abs() < 0.001);
+        assert!((lines(&list, id)[0].baseline - 340.0208).abs() < 0.001);
     }
     let font_based = lines(&list, 3);
     let control = lines(&list, 7);
@@ -129,5 +132,43 @@ fn zero_spacing_overrides_inherited_spacing() {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].height, 0.0);
         assert_eq!(lines[1].baseline, lines[0].baseline);
+    }
+}
+
+#[test]
+fn autofit_line_space_reduction_shortens_percentage_spacing_only() {
+    let session = DeckSession::open(DECK, 3144).unwrap();
+    let renderer = renderer();
+    let snapshot = session.snapshot().unwrap();
+    let base = renderer
+        .layout_slide(session.package(), &snapshot, 0)
+        .unwrap()
+        .display_list;
+    let mut package = session.package().clone();
+    for shape in &mut package.slides[0].shapes {
+        let ShapeNode::Shape(shape) = shape else {
+            continue;
+        };
+        let Some(text) = shape.text.as_mut() else {
+            continue;
+        };
+        text.autofit = Some(pptx_parse::TextAutofit::Normal {
+            font_scale: None,
+            line_space_reduction: Some(0.2),
+        });
+    }
+    let reduced = renderer
+        .layout_slide(&package, &snapshot, 0)
+        .unwrap()
+        .display_list;
+    for (id, factor) in [(6, (1.5 - 0.2) / 1.5), (7, 0.8), (4, 1.0)] {
+        let before = lines(&base, id);
+        let after = lines(&reduced, id);
+        let pitch = before[1].y - before[0].y;
+        assert!(
+            (after[1].y - after[0].y - pitch * factor).abs() < 0.001,
+            "shape {id}: {pitch} -> {}",
+            after[1].y - after[0].y
+        );
     }
 }
