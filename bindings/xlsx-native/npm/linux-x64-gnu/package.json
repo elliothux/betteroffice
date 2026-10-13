@@ -8,7 +8,7 @@
   "files": [
     "betteroffice-xlsx-native.linux-x64-gnu.node"
   ],
-  "description": "Native Rust bindings for the BetterOffice XLSX engine in Node.js and Bun.",
+  "description": "Native Rust bindings for the BetterOffice XLSX engine in Node.js, Bun and Deno.",
   "keywords": [
     "xlsx",
     "excel",
@@ -17,6 +17,7 @@
     "nodejs",
     "node-api",
     "bun",
+    "deno",
     "native",
     "rust"
   ],

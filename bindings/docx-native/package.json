@@ -1,7 +1,8 @@
 {
   "name": "@betteroffice/docx-native",
   "version": "0.4.3",
-  "description": "Native Rust bindings for the BetterOffice DOCX engine in Node.js and Bun.",
+  "private": true,
+  "description": "Native Rust bindings for the BetterOffice DOCX engine in Node.js, Bun and Deno.",
   "main": "index.js",
   "types": "index.d.ts",
   "files": [
@@ -39,6 +40,7 @@
     "nodejs",
     "node-api",
     "bun",
+    "deno",
     "native",
     "rust"
   ],
