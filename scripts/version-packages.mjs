@@ -1,6 +1,10 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { PYTHON_BINDINGS } from './python-bindings.mjs';
-import { NODE_BINDINGS, synchronizeNodeLoader, validateNodeVersions } from './native-bindings.mjs';
+import {
+  NATIVE_PACKAGES,
+  synchronizeNativeLoader,
+  validateNativeVersions
+} from './native-bindings.mjs';
 import {
   RUST_CRATES,
   STANDALONE_WORKSPACES,
@@ -89,10 +93,10 @@ function synchronizeBunLock() {
 }
 
 const checkOnly = process.argv.includes('--check');
-validateNodeVersions();
+validateNativeVersions();
 const before = rustReleaseVersion();
 const cargoBefore = readFileSync(WORKSPACE_MANIFEST, 'utf8');
-const bindings = [...PYTHON_BINDINGS, ...NODE_BINDINGS];
+const bindings = [...PYTHON_BINDINGS, ...NATIVE_PACKAGES];
 const bindingBefore = new Map(
   bindings.map((binding) => [binding, bindingReleaseVersion(binding)])
 );
@@ -164,15 +168,20 @@ for (const binding of bindings) {
     synchronizeBindingVersion(binding, readFileSync(cargoManifest(binding), 'utf8'), from, to)
   );
 }
-for (const binding of NODE_BINDINGS) {
+for (const binding of NATIVE_PACKAGES) {
   run('bunx', ['napi', 'version', '--cwd', binding]);
   const loader = `${binding}/index.js`;
-  writeFileSync(loader, synchronizeNodeLoader(
-    readFileSync(loader, 'utf8'), bindingBefore.get(binding), bindingAfter.get(binding)
-  ));
+  writeFileSync(
+    loader,
+    synchronizeNativeLoader(
+      readFileSync(loader, 'utf8'),
+      bindingBefore.get(binding),
+      bindingAfter.get(binding)
+    )
+  );
 }
 
-validateNodeVersions();
+validateNativeVersions();
 validate(after, true);
 synchronizeStandaloneLocks();
 synchronizeBunLock();

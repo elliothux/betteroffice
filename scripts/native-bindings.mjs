@@ -1,13 +1,17 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-export const NODE_BINDINGS = ['bindings/docx-native', 'bindings/pptx-native', 'bindings/xlsx-native'];
+export const NATIVE_PACKAGES = [
+  'bindings/docx-native',
+  'bindings/pptx-native',
+  'bindings/xlsx-native'
+];
 
 function bindingName(path) {
   return path.replace(/^bindings\//, '').replace(/-native$/, '');
 }
 
-export const NODE_BINDING_NAMES = NODE_BINDINGS.map(bindingName);
+export const NATIVE_FORMATS = NATIVE_PACKAGES.map(bindingName);
 
 function manifest(path) {
   return JSON.parse(readFileSync(new URL(`../${path}/package.json`, import.meta.url), 'utf8'));
@@ -17,28 +21,39 @@ export function bindingVersion(path) {
   return manifest(path).version;
 }
 
-export function synchronizeNodeLoader(source, from, to) {
+export function synchronizeNativeLoader(source, from, to) {
   const versions = [...source.matchAll(/bindingPackageVersion !== '([^']+)'/g)];
   if (versions.length === 0 || versions.some((match) => match[1] !== from)) {
     throw new Error(`Native loader is not synchronized at ${from}`);
   }
   return source
     .replaceAll(`bindingPackageVersion !== '${from}'`, `bindingPackageVersion !== '${to}'`)
-    .replaceAll(`version mismatch, expected ${from} but got`, `version mismatch, expected ${to} but got`);
+    .replaceAll(
+      `version mismatch, expected ${from} but got`,
+      `version mismatch, expected ${to} but got`
+    );
 }
 
-export function validateNodeVersions() {
-  for (const path of NODE_BINDINGS) {
-    const version = bindingVersion(path);
+export function validateNativeVersions() {
+  for (const path of NATIVE_PACKAGES) {
+    const root = manifest(path);
+    const version = root.version;
+    if (root.private !== true) {
+      throw new Error(`${path} must be private`);
+    }
     if (bindingVersion(`packages/${bindingName(path)}`) !== version) {
       throw new Error(`${path} must match its core package version`);
     }
     for (const identity of readdirSync(new URL(`../${path}/npm`, import.meta.url))) {
-      if (bindingVersion(`${path}/npm/${identity}`) !== version) {
+      const platform = manifest(`${path}/npm/${identity}`);
+      if (platform.private === true) {
+        throw new Error(`${path}/npm/${identity} must be public`);
+      }
+      if (platform.version !== version) {
         throw new Error(`${path}/npm/${identity} must match ${version}`);
       }
     }
-    synchronizeNodeLoader(
+    synchronizeNativeLoader(
       readFileSync(new URL(`../${path}/index.js`, import.meta.url), 'utf8'),
       version,
       version
@@ -47,7 +62,7 @@ export function validateNodeVersions() {
 }
 
 export function platformPackageVersions() {
-  return NODE_BINDINGS.flatMap((path) =>
+  return NATIVE_PACKAGES.flatMap((path) =>
     readdirSync(new URL(`../${path}/npm`, import.meta.url)).map((identity) => {
       const platform = manifest(`${path}/npm/${identity}`);
       return { name: platform.name, version: platform.version };
@@ -57,19 +72,36 @@ export function platformPackageVersions() {
 
 export async function pendingPublishNames({ fetchImpl = fetch } = {}) {
   const pending = [];
-  for (const path of NODE_BINDINGS) {
-    const { name, version } = manifest(path);
-    const response = await fetchImpl(`https://registry.npmjs.org/${encodeURIComponent(name)}`, {
-      headers: { Accept: 'application/vnd.npm.install-v1+json' },
-      signal: AbortSignal.timeout(15_000)
-    });
-    if (response.status === 404) {
-      pending.push(bindingName(path));
-      continue;
+  const missing = [];
+  for (const path of NATIVE_PACKAGES) {
+    const root = manifest(path);
+    const packages = [
+      root,
+      ...readdirSync(new URL(`../${path}/npm`, import.meta.url)).map((identity) =>
+        manifest(`${path}/npm/${identity}`)
+      )
+    ];
+    for (const { name } of packages) {
+      const response = await fetchImpl(`https://registry.npmjs.org/${encodeURIComponent(name)}`, {
+        headers: { Accept: 'application/vnd.npm.install-v1+json' },
+        signal: AbortSignal.timeout(15_000)
+      });
+      if (response.status === 404) {
+        missing.push(name);
+        continue;
+      }
+      if (!response.ok) throw new Error(`npm answered ${response.status} for ${name}`);
+      if (name === root.name) {
+        const metadata = await response.json();
+        if (!(root.version in (metadata.versions ?? {}))) pending.push(bindingName(path));
+      }
     }
-    if (!response.ok) throw new Error(`npm answered ${response.status} for ${name}`);
-    const metadata = await response.json();
-    if (!(version in (metadata.versions ?? {}))) pending.push(bindingName(path));
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing npm packages: ${missing.join(', ')}. They must be published by hand first ` +
+        '(RELEASING.md, "Native packages"), because Trusted Publishing cannot create a package.'
+    );
   }
   return pending;
 }
@@ -81,6 +113,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(2);
   }
   console.log(
-    mode === '--paths' ? NODE_BINDINGS.join('\n') : JSON.stringify(await pendingPublishNames())
+    mode === '--paths' ? NATIVE_PACKAGES.join('\n') : JSON.stringify(await pendingPublishNames())
   );
 }
