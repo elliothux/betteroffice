@@ -146,6 +146,14 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 hyperlinks: old,
             }]))
         }
+        Op::RestoreColStyles { sheet, styles } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = std::mem::replace(&mut s.col_styles, styles.clone());
+            Ok(InvertedOp(vec![Op::RestoreColStyles {
+                sheet: *sheet,
+                styles: old,
+            }]))
+        }
         Op::SetCharts { sheet, charts } => {
             let sheet_ref = sheet_mut(wb, *sheet)?;
             let old = std::mem::replace(&mut sheet_ref.charts, charts.clone());
@@ -442,6 +450,22 @@ fn apply_range_formats(
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
 /// concatenated in reverse order).
 pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+    if let [op @ Op::SetCell { .. }] = ops {
+        #[cfg(test)]
+        if FORCE_CLONE_ROLLBACK.get() {
+            return apply_ops_cloned(wb, ops);
+        }
+        return apply_in_place(wb, op).map(|inverse| inverse.0);
+    }
+    apply_ops_cloned(wb, ops)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_CLONE_ROLLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn apply_ops_cloned(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
     let mut next = wb.clone();
     let inverse = apply_ops_in_place(&mut next, ops)?;
     *wb = next;
@@ -626,6 +650,7 @@ fn insert_cols(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
+    let old_col_styles = s.col_styles.clone();
     let dropped = shift_cells(s, op);
     shift_col_widths_up(s, at, count);
     shift_col_styles_up(s, at, count);
@@ -633,6 +658,12 @@ fn insert_cols(
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::DeleteCols { sheet, at, count }];
+    if !old_col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: old_col_styles,
+        });
+    }
     for (r, c) in dropped {
         inv.push(Op::SetCell {
             sheet,
@@ -665,6 +696,7 @@ fn delete_cols(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
+    let old_col_styles = s.col_styles.clone();
     let deleted = shift_cells(s, op);
     let dropped_widths = shift_col_widths_down(s, at, count);
     shift_col_styles_down(s, at, count);
@@ -672,6 +704,12 @@ fn delete_cols(
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::InsertCols { sheet, at, count }];
+    if !old_col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: old_col_styles,
+        });
+    }
     for (r, c) in deleted {
         inv.push(Op::SetCell {
             sheet,
@@ -933,6 +971,12 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
             hyperlinks: removed.hyperlinks,
         });
     }
+    if !removed.col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: removed.col_styles,
+        });
+    }
     if !removed.charts.is_empty() {
         inv.push(Op::SetCharts {
             sheet,
@@ -1011,6 +1055,76 @@ mod tests {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Sheet1"));
         wb
+    }
+
+    #[test]
+    fn singleton_set_cell_matches_clone_rollback() {
+        let states = [
+            CellState::default(),
+            num(123.0),
+            CellState {
+                value: CellValue::Text {
+                    value: "rich text".into(),
+                },
+                style: Some(7),
+                ..Default::default()
+            },
+            CellState {
+                value: CellValue::Number { value: 42.0 },
+                formula: Some("A1+1".into()),
+                style: Some(0),
+            },
+            CellState {
+                style: Some(u32::MAX),
+                ..Default::default()
+            },
+        ];
+        for before in &states {
+            for after in &states {
+                for at in [r("B2"), CellRef::new(MAX_ROWS, MAX_COLS)] {
+                    let mut initial = wb_one_sheet();
+                    initial.sheets.push(Sheet::new("Second"));
+                    initial.sheets[1].set_cell(at, before.clone().into());
+                    initial.sheets[1].set_array_formula(at, CellRange::new(at, at));
+                    let op = Op::SetCell {
+                        sheet: SheetId(1),
+                        at,
+                        cell: after.clone(),
+                    };
+                    let mut fast = initial.clone();
+                    let mut oracle = initial.clone();
+                    let result = apply_ops(&mut fast, std::slice::from_ref(&op));
+                    FORCE_CLONE_ROLLBACK.set(true);
+                    let expected = apply_ops(&mut oracle, std::slice::from_ref(&op));
+                    FORCE_CLONE_ROLLBACK.set(false);
+                    assert_eq!(result, expected);
+                    assert_eq!(fast, oracle);
+                    apply_ops(&mut fast, &result.unwrap()).unwrap();
+                    assert_eq!(fast, initial);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failing_singleton_set_cell_leaves_model_unchanged() {
+        for initial in [Workbook::default(), wb_one_sheet()] {
+            for sheet in [SheetId(initial.sheets.len() as u32), SheetId(u32::MAX)] {
+                let op = Op::SetCell {
+                    sheet,
+                    at: r("B2"),
+                    cell: num(123.0),
+                };
+                let mut fast = initial.clone();
+                let mut oracle = initial.clone();
+                let result = apply_ops(&mut fast, std::slice::from_ref(&op));
+                let expected = apply_ops_cloned(&mut oracle, std::slice::from_ref(&op));
+                assert_eq!(result, Err(OpError::SheetNotFound(sheet)));
+                assert_eq!(result, expected);
+                assert_eq!(fast, initial);
+                assert_eq!(oracle, initial);
+            }
+        }
     }
 
     #[test]
@@ -1339,6 +1453,62 @@ mod tests {
             apply(&mut wb, operation).unwrap();
         }
         assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn column_style_runs_survive_structural_undo_and_redo() {
+        let runs = vec![
+            ColStyle {
+                first: 0,
+                last: 6,
+                xf: 1,
+            },
+            ColStyle {
+                first: 2,
+                last: 3,
+                xf: 2,
+            },
+            ColStyle {
+                first: 3,
+                last: 7,
+                xf: 3,
+            },
+            ColStyle {
+                first: MAX_COLS - 1,
+                last: MAX_COLS - 1,
+                xf: 4,
+            },
+        ];
+        for op in [
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 8,
+            },
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 2,
+            },
+            Op::RemoveSheet { index: 0 },
+        ] {
+            let mut workbook = wb_one_sheet();
+            workbook.sheets[0].col_styles = runs.clone();
+            let before = workbook.clone();
+            let inverse = apply_ops(&mut workbook, &[op]).unwrap();
+            let edited = workbook.clone();
+            let redo = apply_ops(&mut workbook, &inverse).unwrap();
+            assert_eq!(workbook, before);
+            let undo = apply_ops(&mut workbook, &redo).unwrap();
+            assert_eq!(workbook, edited);
+            apply_ops(&mut workbook, &undo).unwrap();
+            assert_eq!(workbook, before);
+        }
     }
 
     #[test]
