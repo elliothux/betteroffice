@@ -7,7 +7,6 @@
 // that 404s. This runs first and names what has to be bootstrapped by hand.
 import { fileURLToPath } from 'node:url';
 import { publishedPackageVersions } from './published-packages.mjs';
-import { platformPackageVersions } from './native-bindings.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const NPM_REGISTRY = process.env.NPM_REGISTRY_URL ?? 'https://registry.npmjs.org';
@@ -83,11 +82,7 @@ export async function auditNpmPackages(packages, registry = NPM_REGISTRY) {
       continue;
     }
     const versions = body.versions ?? {};
-    audit.push({
-      name,
-      version,
-      state: version in versions ? 'published' : 'new'
-    });
+    audit.push({ name, version, state: version in versions ? 'published' : 'new' });
   }
   return audit;
 }
@@ -103,10 +98,7 @@ export async function auditCrates(names, registry = CRATES_REGISTRY) {
 }
 
 async function checkNpm() {
-  const audit = await auditNpmPackages([
-    ...publishedPackageVersions(),
-    ...platformPackageVersions()
-  ]);
+  const audit = await auditNpmPackages(publishedPackageVersions());
   for (const { name, version, state } of audit) {
     if (state === 'published') console.log(`${name}@${version} is on npm.`);
     if (state === 'new') console.log(`${name}@${version} is a new version of a package on npm.`);
@@ -118,9 +110,7 @@ async function checkNpm() {
   console.error(
     'release.yml publishes with OIDC Trusted Publishing, which cannot create a package. `changeset publish` would publish the rest of the set before it fails on these.'
   );
-  console.error(
-    'Publish each by hand first: RELEASING.md, "Initial npm release of a new package".'
-  );
+  console.error('Publish each by hand first: RELEASING.md, "Initial npm release of a new package".');
   return 1;
 }
 
