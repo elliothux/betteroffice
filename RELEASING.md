@@ -90,16 +90,16 @@ Native Node packages have one root package and one optional package per
 platform. Bootstrap every name in that set together:
 
 1. Run **Publish a Node native binding** with `dry_run=true` and the release
-   commit SHA. Download its five `node-<format>.*` artifacts into
-   `bindings/node-<format>/artifacts` in a clean checkout of that SHA.
+   commit SHA. Download its five `<format>-native.*` artifacts into
+   `bindings/<format>-native/artifacts` in a clean checkout of that SHA.
 2. Run `bun install --frozen-lockfile`, then
-   `bunx napi artifacts --cwd bindings/node-<format>`.
+   `bunx napi artifacts --cwd bindings/<format>-native`.
 3. Log in to npm with an account that can publish the `@betteroffice` scope and
    run `npm publish --access public --provenance=false` from
-   `bindings/node-<format>`. Its `prepublishOnly` publishes the five platform
+   `bindings/<format>-native`. Its `prepublishOnly` publishes the five platform
    packages before npm publishes the root package.
 4. Configure all six package names with workflow
-   `publish-node-binding.yml` and environment `npm-<format>`, then use the
+   `publish-native.yml` and environment `npm-<format>`, then use the
    workflow for later versions.
 
 An optional peer that 404s does not make installation fail: npm silently omits
@@ -115,14 +115,14 @@ command then.
 
 ## Node native bindings
 
-`scripts/node-bindings.mjs` is the single registry for the DOCX, PPTX, and XLSX
+`scripts/native-bindings.mjs` is the single registry for the DOCX, PPTX, and XLSX
 Node bindings. Each native package shares its format's fixed Changesets group
 with the core, React, and locale packages. They start at the same version:
 DOCX and XLSX at `0.2.1`, PPTX at `0.1.1`. Bumping any package in a format's group
 releases the native package with it. `version-packages.mjs` synchronizes the
 Cargo manifest, platform manifests, generated loader version checks, and locks.
 
-`publish-node-binding.yml` is the only workflow that uploads native Node
+`publish-native.yml` is the only workflow that uploads native Node
 packages. It builds macOS arm64/x64, Linux arm64/x64 GNU, and Windows x64 MSVC
 artifacts at the release commit, assembles the NAPI-RS optional packages, and
 publishes through npm Trusted Publishing. `release.yml` detects unpublished
@@ -131,7 +131,7 @@ remaining npm packages and Rust crates.
 
 Every root and platform package for one format uses the same GitHub environment,
 `npm-<format>`, and names owner `openooxml`, repository `betteroffice`, workflow
-`publish-node-binding.yml` in its npm Trusted Publisher configuration. The
+`publish-native.yml` in its npm Trusted Publisher configuration. The
 workflow rejects `NPM_TOKEN`; there is no repository-token fallback.
 
 The native API follows Node.js conventions rather than copying Python call

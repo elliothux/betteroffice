@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { PYTHON_BINDINGS } from './python-bindings.mjs';
-import { NODE_BINDINGS, synchronizeNodeLoader, validateNodeVersions } from './node-bindings.mjs';
+import { NODE_BINDINGS, synchronizeNodeLoader, validateNodeVersions } from './native-bindings.mjs';
 import {
   RUST_CRATES,
   STANDALONE_WORKSPACES,

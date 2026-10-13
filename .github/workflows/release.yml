@@ -117,11 +117,11 @@ jobs:
         run: |
           status=0
           runs=""
-          pending=$(node scripts/node-bindings.mjs --pending)
+          pending=$(node scripts/native-bindings.mjs --pending)
           bindings=$(printf '%s' "$pending" | jq -er '.[]' || [ "$pending" = '[]' ])
           for binding in $bindings; do
             if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
-              "repos/$GH_REPO/actions/workflows/publish-node-binding.yml/dispatches" \
+              "repos/$GH_REPO/actions/workflows/publish-native.yml/dispatches" \
               -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
               -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
               runs="$runs $binding:$run"

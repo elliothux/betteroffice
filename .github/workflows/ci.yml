@@ -276,13 +276,13 @@ jobs:
 
       - name: Build and test
         run: |
-          for binding in $(node scripts/node-bindings.mjs --paths); do
+          for binding in $(node scripts/native-bindings.mjs --paths); do
             bunx napi build --cwd "$binding" --platform -- --locked
             bun test "$binding/index.test.ts"
           done
 
       - name: Check generated bindings
-        run: git diff --exit-code -- 'bindings/node-*/index.js' 'bindings/node-*/index.d.ts'
+        run: git diff --exit-code -- 'bindings/*-native/index.js' 'bindings/*-native/index.d.ts'
 
       - uses: actions/setup-node@v7.0.0
         with:
@@ -301,7 +301,7 @@ jobs:
           for format in docx pptx xlsx; do
             package_dir="$smoke_dir/node_modules/@betteroffice/$format-native"
             mkdir -p "$package_dir"
-            cp "bindings/node-$format/package.json" "bindings/node-$format/index.js" "bindings/node-$format/index.d.ts" bindings/node-$format/*.node "$package_dir/"
+            cp "bindings/$format-native/package.json" "bindings/$format-native/index.js" "bindings/$format-native/index.d.ts" bindings/$format-native/*.node "$package_dir/"
           done
           cp scripts/native-bindings-smoke.mjs "$smoke_dir/smoke.mjs"
           deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi "$smoke_dir/smoke.mjs" "$PWD"
@@ -309,7 +309,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: node-native.${{ matrix.platform.target }}
-          path: bindings/node-*/*.node
+          path: bindings/*-native/*.node
           if-no-files-found: error
 
   node-packages:
@@ -343,7 +343,7 @@ jobs:
         env:
           BINDING: ${{ matrix.binding }}
         run: |
-          mkdir -p "bindings/node-$BINDING/artifacts"
-          cp "artifacts/node-$BINDING/"*.node "bindings/node-$BINDING/artifacts/"
-          bunx napi artifacts --cwd "bindings/node-$BINDING"
-          bunx napi pre-publish --cwd "bindings/node-$BINDING" --tag-style npm --dry-run --no-gh-release
+          mkdir -p "bindings/$BINDING-native/artifacts"
+          cp "artifacts/$BINDING-native/"*.node "bindings/$BINDING-native/artifacts/"
+          bunx napi artifacts --cwd "bindings/$BINDING-native"
+          bunx napi pre-publish --cwd "bindings/$BINDING-native" --tag-style npm --dry-run --no-gh-release

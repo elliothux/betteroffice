@@ -7,7 +7,7 @@
 // that 404s. This runs first and names what has to be bootstrapped by hand.
 import { fileURLToPath } from 'node:url';
 import { publishedPackageVersions } from './published-packages.mjs';
-import { platformPackageVersions } from './node-bindings.mjs';
+import { platformPackageVersions } from './native-bindings.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const NPM_REGISTRY = process.env.NPM_REGISTRY_URL ?? 'https://registry.npmjs.org';

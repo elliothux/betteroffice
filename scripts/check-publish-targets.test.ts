@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { publishedCrates, publishedPackageVersions } from './published-packages.mjs';
-import { platformPackageVersions } from './node-bindings.mjs';
+import { platformPackageVersions } from './native-bindings.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const script = fileURLToPath(new URL('./check-publish-targets.mjs', import.meta.url));
