@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-node"
-version = "0.2.1"
+version = "0.4.3"
 dependencies = [
  "betteroffice-docx",
  "napi",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-node"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "betteroffice-pptx",
  "napi",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-node"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "betteroffice-xlsx",
  "napi",
