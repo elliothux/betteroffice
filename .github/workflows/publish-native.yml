@@ -1,6 +1,6 @@
-name: Publish a Node native binding
+name: Publish a native package
 
-run-name: Publish @betteroffice/${{ inputs.binding }}-native @ ${{ inputs.sha }}
+run-name: Publish native package @betteroffice/${{ inputs.binding }}-native @ ${{ inputs.sha }}
 on:
   workflow_dispatch:
     inputs:
@@ -77,6 +77,11 @@ jobs:
             echo "::error::NPM_TOKEN is set. This workflow publishes through Trusted Publishing only."
             exit 1
           fi
+
+      # The repository copy is private so changeset publish skips it.
+      - name: Make the root publishable
+        working-directory: bindings/${{ inputs.binding }}-native
+        run: npm pkg delete private
 
       - name: Validate packages
         if: inputs.dry_run

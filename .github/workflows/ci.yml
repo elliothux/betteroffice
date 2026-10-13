@@ -236,27 +236,10 @@ jobs:
             (cd "$binding" && pytest -q)
           done
 
-  node-native:
-    name: Node native gate (${{ matrix.platform.target }})
-    runs-on: ${{ matrix.platform.os }}
+  native:
+    name: Native gate
+    runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v7
 
@@ -269,20 +252,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings
-          key: node-native-${{ matrix.platform.target }}
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build and test
-        run: |
-          for binding in $(node scripts/native-bindings.mjs --paths); do
-            bunx napi build --cwd "$binding" --platform -- --locked
-            bun test "$binding/index.test.ts"
-          done
-
-      - name: Check generated bindings
-        run: git diff --exit-code -- 'bindings/*-native/index.js' 'bindings/*-native/index.d.ts'
+          key: native
 
       - uses: actions/setup-node@v7.0.0
         with:
@@ -292,58 +262,30 @@ jobs:
         with:
           deno-version: "v2.9.0"
 
-      - name: Check native runtime compatibility
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build and test
+        run: |
+          for package in $(node scripts/native-bindings.mjs --paths); do
+            bunx napi build --cwd "$package" --platform -- --locked
+            bun test "$package/index.test.ts"
+          done
+
+      - name: Check generated loaders
+        run: git diff --exit-code -- 'bindings/*-native/index.js' 'bindings/*-native/index.d.ts'
+
+      - name: Check runtimes
         run: |
           node scripts/native-bindings-smoke.mjs
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)
           trap 'rm -rf "$smoke_dir"' EXIT
-          for format in docx pptx xlsx; do
-            package_dir="$smoke_dir/node_modules/@betteroffice/$format-native"
+          for package in $(node scripts/native-bindings.mjs --paths); do
+            format=${package#bindings/}
+            package_dir="$smoke_dir/node_modules/@betteroffice/$format"
             mkdir -p "$package_dir"
-            cp "bindings/$format-native/package.json" "bindings/$format-native/index.js" "bindings/$format-native/index.d.ts" bindings/$format-native/*.node "$package_dir/"
+            cp "$package/package.json" "$package/index.js" "$package/index.d.ts" "$package/"*.node "$package_dir/"
           done
           cp scripts/native-bindings-smoke.mjs "$smoke_dir/smoke.mjs"
           deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi "$smoke_dir/smoke.mjs" "$PWD"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: node-native.${{ matrix.platform.target }}
-          path: bindings/*-native/*.node
-          if-no-files-found: error
-
-  node-packages:
-    name: Assemble native packages (${{ matrix.binding }})
-    needs: node-native
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        binding: [docx, pptx, xlsx]
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.2"
-
-      - uses: actions/setup-node@v7.0.0
-        with:
-          node-version: "24"
-
-      - run: bun install --frozen-lockfile
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: node-native.*
-          path: artifacts
-          merge-multiple: true
-
-      - name: Assemble and validate all platform packages
-        env:
-          BINDING: ${{ matrix.binding }}
-        run: |
-          mkdir -p "bindings/$BINDING-native/artifacts"
-          cp "artifacts/$BINDING-native/"*.node "bindings/$BINDING-native/artifacts/"
-          bunx napi artifacts --cwd "bindings/$BINDING-native"
-          bunx napi pre-publish --cwd "bindings/$BINDING-native" --tag-style npm --dry-run --no-gh-release

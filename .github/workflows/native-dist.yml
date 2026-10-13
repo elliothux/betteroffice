@@ -1,10 +1,10 @@
-name: Node native dist
+name: Native dist
 
 on:
   workflow_call:
     inputs:
       binding:
-        description: The bindings/<binding>-native package to build.
+        description: The native package to build.
         required: true
         type: string
       sha:
