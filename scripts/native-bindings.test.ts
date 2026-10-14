@@ -350,11 +350,14 @@ describe('native package release wiring', () => {
     expect(job.steps[0].uses).toBe('actions/checkout@v7');
     const bun = job.steps.find((step: any) => step.uses === 'oven-sh/setup-bun@v2');
     expect(bun.with['bun-version']).toBe('1.4.2');
-    expect(job.steps.some((step: any) => step.uses === 'dtolnay/rust-toolchain@stable')).toBe(
-      true
-    );
+    const toolchain = job.steps.find((step: any) => step.uses === 'dtolnay/rust-toolchain@stable');
+    expect(toolchain.with.targets).toBe('wasm32-unknown-unknown');
     const cache = job.steps.find((step: any) => step.uses === 'Swatinem/rust-cache@v2');
-    expect(cache.with).toEqual({ workspaces: 'bindings', key: 'native' });
+    expect(cache.with).toEqual({ workspaces: '.\nbindings\n', key: 'native' });
+    expect(job.steps.some((step: any) => step.uses === './.github/actions/wasm-toolchain')).toBe(true);
+    expect(job.steps.some((step: any) => step.with?.tool === 'wasm-pack@0.15.0')).toBe(true);
+    const wasmCache = job.steps.find((step: any) => step.with?.path === 'target/wasm-pack');
+    expect(wasmCache.with.key).toBe('wasm-pack-${{ steps.wasm.outputs.key }}');
     const runtime = job.steps.find((step: any) => step.uses === 'actions/setup-node@v7.0.0');
     expect(runtime.with['node-version']).toBe('24');
     const deno = job.steps.find((step: any) => step.uses === 'denoland/setup-deno@v2');
@@ -364,6 +367,15 @@ describe('native package release wiring', () => {
     expect(build.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
     expect(build.run).toContain('bunx napi build --cwd "$package" --platform -- --locked');
     expect(build.run).toContain('bun test "$package/index.test.ts"');
+    const wasm = job.steps.find((step: any) => step.name === 'Build wasm for parity');
+    expect(wasm.run).toContain('bun run --filter @betteroffice/xlsx build:wasm');
+    expect(wasm.run).toContain('bun run --filter @betteroffice/pptx build:wasm');
+    const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
+    expect(parity.run).toBe('bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts');
+    expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
+    expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
+    const root = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    expect(root.scripts.test).not.toContain('bindings');
     const declarations = job.steps.find((step: any) => step.name === 'Check generated declarations');
     expect(declarations.run).toBe("git diff --exit-code -- 'bindings/*-native/index.d.ts'");
     const smoke = job.steps.find((step: any) => step.name === 'Check runtimes');
