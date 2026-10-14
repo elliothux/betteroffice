@@ -66,6 +66,11 @@ jobs:
           path: bindings/${{ inputs.binding }}-native/artifacts
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.binding }}-native-loader
+          path: bindings/${{ inputs.binding }}-native
+
       - name: Assemble packages
         run: bunx napi artifacts --cwd bindings/${{ inputs.binding }}-native
 
@@ -82,6 +87,10 @@ jobs:
       - name: Make the root publishable
         working-directory: bindings/${{ inputs.binding }}-native
         run: npm pkg delete private
+
+      - name: Check root contents
+        working-directory: bindings/${{ inputs.binding }}-native
+        run: npm pack --dry-run --json | jq -e '["index.js", "index.d.ts"] - [.[0].files[].path] == []'
 
       - name: Validate packages
         if: inputs.dry_run

@@ -1,10 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { PYTHON_BINDINGS } from './python-bindings.mjs';
-import {
-  NATIVE_PACKAGES,
-  synchronizeNativeLoader,
-  validateNativeVersions
-} from './native-bindings.mjs';
+import { NATIVE_PACKAGES, validateNativeVersions } from './native-bindings.mjs';
 import {
   RUST_CRATES,
   STANDALONE_WORKSPACES,
@@ -170,15 +166,6 @@ for (const binding of bindings) {
 }
 for (const binding of NATIVE_PACKAGES) {
   run('bunx', ['napi', 'version', '--cwd', binding]);
-  const loader = `${binding}/index.js`;
-  writeFileSync(
-    loader,
-    synchronizeNativeLoader(
-      readFileSync(loader, 'utf8'),
-      bindingBefore.get(binding),
-      bindingAfter.get(binding)
-    )
-  );
 }
 
 validateNativeVersions();

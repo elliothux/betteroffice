@@ -102,7 +102,7 @@ command then.
 `@betteroffice/{docx,pptx,xlsx}-native` are three roots with five platform packages
 each (macOS arm64/x64, GNU Linux arm64/x64, Windows x64): 18 npm names.
 Each root joins its core's fixed Changesets group. `version-packages.mjs` syncs
-the platform manifests, Cargo version and loader checks.
+the platform manifests and the Cargo version.
 Repository roots are private so `changeset publish` skips them. The dispatch-only
 `publish-native.yml` drops `private` and uploads with OIDC Trusted Publishing in
 environment `npm-<format>`, refusing `NPM_TOKEN`.
@@ -115,7 +115,8 @@ repeating these steps for `docx`, `pptx` and `xlsx`:
 
 1. Run `publish-native.yml` with `dry_run=true` at the release commit. Download its
    five `<format>-native.*` artifacts into `bindings/<format>-native/artifacts`
-   in a clean checkout of that commit.
+   and the `<format>-native-loader` artifact's `index.js` into
+   `bindings/<format>-native` in a clean checkout of that commit.
 2. Run `bun install --frozen-lockfile`, then `bunx napi artifacts --cwd bindings/<format>-native`.
 3. From `bindings/<format>-native`, run `npm pkg delete private`, then
    `npm publish --access public --provenance=false`. Its `prepublishOnly` publishes the five platform packages first.

@@ -21,19 +21,6 @@ export function bindingVersion(path) {
   return manifest(path).version;
 }
 
-export function synchronizeNativeLoader(source, from, to) {
-  const versions = [...source.matchAll(/bindingPackageVersion !== '([^']+)'/g)];
-  if (versions.length === 0 || versions.some((match) => match[1] !== from)) {
-    throw new Error(`Native loader is not synchronized at ${from}`);
-  }
-  return source
-    .replaceAll(`bindingPackageVersion !== '${from}'`, `bindingPackageVersion !== '${to}'`)
-    .replaceAll(
-      `version mismatch, expected ${from} but got`,
-      `version mismatch, expected ${to} but got`
-    );
-}
-
 export function validateNativeVersions() {
   for (const path of NATIVE_PACKAGES) {
     const root = manifest(path);
@@ -53,11 +40,6 @@ export function validateNativeVersions() {
         throw new Error(`${path}/npm/${identity} must match ${version}`);
       }
     }
-    synchronizeNativeLoader(
-      readFileSync(new URL(`../${path}/index.js`, import.meta.url), 'utf8'),
-      version,
-      version
-    );
   }
 }
 

@@ -272,8 +272,8 @@ jobs:
             bun test "$package/index.test.ts"
           done
 
-      - name: Check generated loaders
-        run: git diff --exit-code -- 'bindings/*-native/index.js' 'bindings/*-native/index.d.ts'
+      - name: Check generated declarations
+        run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
 
       - name: Check runtimes
         run: |

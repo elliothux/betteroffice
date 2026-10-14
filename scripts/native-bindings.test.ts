@@ -11,7 +11,6 @@ import {
   bindingVersion,
   pendingPublishNames,
   platformPackageVersions,
-  synchronizeNativeLoader,
   validateNativeVersions
 } from './native-bindings.mjs';
 
@@ -148,29 +147,6 @@ describe('native version synchronization', () => {
       expect(bindingVersion(`bindings/${format}-native`)).toBe(bindingVersion(`packages/${format}`));
     }
   });
-
-  test('updates generated checks and error messages for every platform', () => {
-    for (const binding of NATIVE_PACKAGES) {
-      const source = readFileSync(new URL(`../${binding}/index.js`, import.meta.url), 'utf8');
-      const before = bindingVersion(binding);
-      const updated = synchronizeNativeLoader(source, before, '999.999.999');
-      const checks = [...source.matchAll(/bindingPackageVersion !== '[^']+'/g)];
-      const messages = [...source.matchAll(/version mismatch, expected [^ ]+ but got/g)];
-      expect(checks.length).toBeGreaterThan(0);
-      expect(messages.length).toBeGreaterThan(0);
-      expect(updated).not.toContain(`bindingPackageVersion !== '${before}'`);
-      expect(updated).not.toContain(`version mismatch, expected ${before} but got`);
-      expect(updated).toContain("bindingPackageVersion !== '999.999.999'");
-      expect([...updated.matchAll(/bindingPackageVersion !== '999\.999\.999'/g)]).toHaveLength(
-        checks.length
-      );
-      expect([...updated.matchAll(/version mismatch, expected 999\.999\.999 but got/g)]).toHaveLength(
-        messages.length
-      );
-      expect(synchronizeNativeLoader(updated, '999.999.999', before)).toBe(source);
-      expect(() => synchronizeNativeLoader(updated, before, '999.999.999')).toThrow('not synchronized');
-    }
-  });
 });
 
 describe('native package release wiring', () => {
@@ -265,16 +241,53 @@ describe('native package release wiring', () => {
     expect(upload.run).toBe('npm publish --access public');
   });
 
-  test('publisher drops private before validation and publishing', () => {
+  test('publisher downloads the loader before assembling and checking packages', () => {
+    const steps = publish.jobs.publish.steps;
+    const download = steps.find(
+      (step: any) =>
+        step.uses === 'actions/download-artifact@v4' &&
+        step.with.pattern === '${{ inputs.binding }}-native.*'
+    );
+    expect(download.with).toEqual({
+      pattern: '${{ inputs.binding }}-native.*',
+      path: 'bindings/${{ inputs.binding }}-native/artifacts',
+      'merge-multiple': true
+    });
+    const loader = steps.find(
+      (step: any) =>
+        step.uses === 'actions/download-artifact@v4' &&
+        step.with.name === '${{ inputs.binding }}-native-loader'
+    );
+    expect(loader.with).toEqual({
+      name: '${{ inputs.binding }}-native-loader',
+      path: 'bindings/${{ inputs.binding }}-native'
+    });
+    expect(steps.indexOf(loader)).toBe(steps.indexOf(download) + 1);
+    expect(steps.indexOf(loader)).toBeLessThan(
+      steps.findIndex((step: any) => step.name === 'Assemble packages')
+    );
+    expect(steps.indexOf(loader)).toBeLessThan(
+      steps.findIndex((step: any) => step.name === 'Check root contents')
+    );
+  });
+
+  test('publisher checks root contents after dropping private and before publishing', () => {
     const steps = publish.jobs.publish.steps;
     const makePublic = steps.find((step: any) => step.name === 'Make the root publishable');
     expect(makePublic.run).toBe('npm pkg delete private');
     expect(makePublic['working-directory']).toBe('bindings/${{ inputs.binding }}-native');
     expect(makePublic.if).toBeUndefined();
-    expect(steps.indexOf(makePublic)).toBeLessThan(
+    const contents = steps.find((step: any) => step.name === 'Check root contents');
+    expect(contents.run).toBe(
+      `npm pack --dry-run --json | jq -e '["index.js", "index.d.ts"] - [.[0].files[].path] == []'`
+    );
+    expect(contents['working-directory']).toBe('bindings/${{ inputs.binding }}-native');
+    expect(contents.if).toBeUndefined();
+    expect(steps.indexOf(contents)).toBe(steps.indexOf(makePublic) + 1);
+    expect(steps.indexOf(contents)).toBeLessThan(
       steps.findIndex((step: any) => step.name === 'Validate packages')
     );
-    expect(steps.indexOf(makePublic)).toBeLessThan(
+    expect(steps.indexOf(contents)).toBeLessThan(
       steps.findIndex((step: any) => step.name === 'Publish packages')
     );
   });
@@ -304,7 +317,31 @@ describe('native package release wiring', () => {
     );
   });
 
-  test('CI builds every path and checks loaders and all three runtimes', () => {
+  test('dist uploads the generated loader from GNU Linux x64 after testing', () => {
+    const steps = dist.jobs.bindings.steps;
+    const loader = steps.find(
+      (step: any) =>
+        step.uses === 'actions/upload-artifact@v4' &&
+        step.with.name === '${{ inputs.binding }}-native-loader'
+    );
+    expect(loader.if).toBe("matrix.platform.target == 'x86_64-unknown-linux-gnu'");
+    expect(loader.with).toEqual({
+      name: '${{ inputs.binding }}-native-loader',
+      path: 'bindings/${{ inputs.binding }}-native/index.js',
+      'if-no-files-found': 'error'
+    });
+    const binary = steps.find(
+      (step: any) =>
+        step.uses === 'actions/upload-artifact@v4' &&
+        step.with.name === '${{ inputs.binding }}-native.${{ matrix.platform.target }}'
+    );
+    expect(steps.indexOf(loader)).toBe(steps.indexOf(binary) + 1);
+    expect(steps.indexOf(loader)).toBeGreaterThan(
+      steps.findIndex((step: any) => step.name === 'Test binding')
+    );
+  });
+
+  test('CI builds every path and checks declarations and all three runtimes', () => {
     const job = ci.jobs.native;
     expect(job.name).toBe('Native gate');
     expect(job['runs-on']).toBe('ubuntu-latest');
@@ -327,10 +364,8 @@ describe('native package release wiring', () => {
     expect(build.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
     expect(build.run).toContain('bunx napi build --cwd "$package" --platform -- --locked');
     expect(build.run).toContain('bun test "$package/index.test.ts"');
-    const loaders = job.steps.find((step: any) => step.name === 'Check generated loaders');
-    expect(loaders.run).toBe(
-      "git diff --exit-code -- 'bindings/*-native/index.js' 'bindings/*-native/index.d.ts'"
-    );
+    const declarations = job.steps.find((step: any) => step.name === 'Check generated declarations');
+    expect(declarations.run).toBe("git diff --exit-code -- 'bindings/*-native/index.d.ts'");
     const smoke = job.steps.find((step: any) => step.name === 'Check runtimes');
     expect(smoke.run).toContain('node scripts/native-bindings-smoke.mjs');
     expect(smoke.run).toContain('bun scripts/native-bindings-smoke.mjs');
@@ -384,11 +419,24 @@ describe('native package release wiring', () => {
     const runtime = job.steps.find((step: any) => step.uses === 'actions/setup-node@v7.0.0');
     expect(runtime.with['node-version']).toBe('24');
     expect(job.steps.some((step: any) => step.run === 'bun install --frozen-lockfile')).toBe(true);
-    const download = job.steps.find((step: any) => step.uses === 'actions/download-artifact@v4');
+    const download = job.steps.find(
+      (step: any) =>
+        step.uses === 'actions/download-artifact@v4' &&
+        step.with.pattern === '${{ matrix.binding }}-native.*'
+    );
     expect(download.with).toEqual({
       pattern: '${{ matrix.binding }}-native.*',
       path: 'bindings/${{ matrix.binding }}-native/artifacts',
       'merge-multiple': true
+    });
+    const loader = job.steps.find(
+      (step: any) =>
+        step.uses === 'actions/download-artifact@v4' &&
+        step.with.name === '${{ matrix.binding }}-native-loader'
+    );
+    expect(loader.with).toEqual({
+      name: '${{ matrix.binding }}-native-loader',
+      path: 'bindings/${{ matrix.binding }}-native'
     });
     const artifacts = job.steps.find((step: any) => step.name === 'Assemble packages');
     expect(artifacts.run).toBe('bunx napi artifacts --cwd bindings/${{ matrix.binding }}-native');
@@ -399,14 +447,19 @@ describe('native package release wiring', () => {
     expect(validate.run).toBe(
       'bunx napi pre-publish --cwd bindings/${{ matrix.binding }}-native --tag-style npm --dry-run --no-gh-release'
     );
-    expect(job.steps.indexOf(download)).toBeLessThan(job.steps.indexOf(artifacts));
+    expect(job.steps.indexOf(loader)).toBe(job.steps.indexOf(download) + 1);
+    expect(job.steps.indexOf(loader)).toBeLessThan(job.steps.indexOf(artifacts));
     expect(job.steps.indexOf(artifacts)).toBeLessThan(job.steps.indexOf(makePublic));
     expect(job.steps.indexOf(makePublic)).toBeLessThan(job.steps.indexOf(validate));
     const pack = job.steps.find((step: any) => step.name === 'Check package contents');
     expect(pack['working-directory']).toBe('bindings/${{ matrix.binding }}-native');
-    expect(pack.run).toStartWith('npm pack --dry-run\n');
+    expect(pack.run).toStartWith(
+      `npm pack --dry-run --json | jq -e '["index.js", "index.d.ts"] - [.[0].files[].path] == []'\n` +
+        'npm pack --dry-run\n'
+    );
     expect(pack.run).toContain('for package in npm/*; do');
     expect(pack.run).toContain('(cd "$package" && npm pack --dry-run)');
+    expect(job.steps.indexOf(loader)).toBeLessThan(job.steps.indexOf(pack));
     expect(job.steps.indexOf(validate)).toBeLessThan(job.steps.indexOf(pack));
   });
 });
@@ -445,18 +498,22 @@ describe('native package public names', () => {
     }
   });
 
-  test('generated loaders require only the -native platform packages', () => {
-    for (const path of NATIVE_PACKAGES) {
-      const manifest = JSON.parse(read(`${path}/package.json`));
-      const format = path.replace(/^bindings\//, '').replace(/-native$/, '');
-      const loader = read(`${path}/index.js`);
-      const required = [...loader.matchAll(/require\('(@betteroffice\/[^']+)'\)/g)].map((m) => m[1]);
-      expect(required.length).toBeGreaterThan(0);
-      for (const name of required) {
-        expect(name.startsWith(`@betteroffice/${format}-native-`)).toBe(true);
-      }
-      expect(loader).toContain(`./${manifest.napi.binaryName}.`);
-    }
+  test('ignores generated native loaders and keeps declarations', () => {
+    expect(read('.gitignore').split('\n')).toContain('bindings/*-native/index.js');
+    const result = spawnSync(
+      'git',
+      [
+        'check-ignore',
+        '--no-index',
+        '--',
+        ...NATIVE_PACKAGES.flatMap((path) => [`${path}/index.js`, `${path}/index.d.ts`])
+      ],
+      { cwd: fileURLToPath(new URL('../', import.meta.url)), encoding: 'utf8' }
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim().split('\n')).toEqual(
+      NATIVE_PACKAGES.map((path) => `${path}/index.js`)
+    );
   });
 
   test('the dist workflow collects the renamed binaries', () => {

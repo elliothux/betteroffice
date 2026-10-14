@@ -58,6 +58,11 @@ jobs:
           path: bindings/${{ matrix.binding }}-native/artifacts
           merge-multiple: true
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.binding }}-native-loader
+          path: bindings/${{ matrix.binding }}-native
+
       - name: Assemble packages
         run: bunx napi artifacts --cwd bindings/${{ matrix.binding }}-native
 
@@ -71,6 +76,7 @@ jobs:
       - name: Check package contents
         working-directory: bindings/${{ matrix.binding }}-native
         run: |
+          npm pack --dry-run --json | jq -e '["index.js", "index.d.ts"] - [.[0].files[].path] == []'
           npm pack --dry-run
           for package in npm/*; do
             (cd "$package" && npm pack --dry-run)

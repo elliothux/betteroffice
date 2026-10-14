@@ -18,6 +18,7 @@ __pycache__/
 .dev.vars
 .env*
 *.tsbuildinfo
+bindings/*-native/index.js
 packages/xlsx/src/wasm/generated/*.wasm
 packages/xlsx/src/wasm/generated/*.js
 packages/pptx/src/wasm/generated/*.wasm
