@@ -749,12 +749,12 @@ impl PptxPresentation {
     pub fn set_comment_status(
         &self,
         comment_id: String,
-        resolved: Option<bool>,
+        resolved: bool,
     ) -> Result<AsyncTask<PendingTask<JsonValue>>> {
         let context = self.context();
         self.worker.submit(move |presentation| {
             presentation
-                .set_comment_status(&context, &comment_id, resolved.unwrap_or(true))
+                .set_comment_status(&context, &comment_id, resolved)
                 .map_err(error)
                 .and_then(json)
         })
@@ -1004,7 +1004,7 @@ pub fn open_presentation(
     Ok(AsyncTask::new(OpenTask {
         bytes: data.to_vec(),
         client_id: options.client_id.map(client_id).transpose()?,
-        author: options.author.unwrap_or_else(|| "node".to_owned()),
+        author: options.author.unwrap_or_else(|| "wasm".to_owned()),
         origin: options
             .origin
             .as_deref()

@@ -46,7 +46,7 @@ export declare class Presentation {
   deleteParagraphBreak(storyId: string, index: number): Promise<any>
   addComment(comment: CommentInput): Promise<any>
   replyToComment(reply: CommentReplyInput): Promise<any>
-  setCommentStatus(commentId: string, resolved?: boolean | undefined | null): Promise<any>
+  setCommentStatus(commentId: string, resolved: boolean): Promise<any>
   removeComment(commentId: string): Promise<any>
   get comments(): Promise<any>
   get commentFlavor(): Promise<string>

@@ -13,6 +13,8 @@ const font = readFileSync(
 describe('@betteroffice/pptx-native', () => {
   test('opens, inspects, renders, and saves a presentation', async () => {
     const presentation = await openPresentation(fixture);
+    expect(presentation.author).toBe('wasm');
+    expect(presentation.origin).toBe('local');
     const snapshot = await presentation.snapshot();
 
     expect(snapshot.slides.length).toBeGreaterThan(0);
@@ -44,5 +46,31 @@ describe('@betteroffice/pptx-native', () => {
     await expect(presentation.renderSlide(0, { maxShadowPixels: Number.NaN })).rejects.toThrow(
       'maxShadowPixels must be a non-negative safe integer'
     );
+  });
+
+  test('preserves explicit edit context and rejects unknown origins and text enums', async () => {
+    const presentation = await openPresentation(fixture, { author: 'editor', origin: 'agent' });
+    expect(presentation.author).toBe('editor');
+    expect(presentation.origin).toBe('agent');
+    await expect((async () => openPresentation(fixture, { origin: 'bogus' }))()).rejects.toThrow();
+    expect(() => { presentation.origin = 'bogus'; }).toThrow();
+    const slideId = (await presentation.slideIds)[0];
+    await expect((async () => presentation.addTextBox(slideId, {
+      name: 'Invalid style', rect: { x: 0, y: 0, width: 1000000, height: 1000000 },
+      text: 'text', style: { caps: 'bogus' }
+    }))()).rejects.toThrow();
+  });
+
+  test('requires an explicit comment status', async () => {
+    const presentation = await openPresentation(fixture);
+    await presentation.setCommentFlavor('modern');
+    const comment = await presentation.addComment({
+      slideId: (await presentation.slideIds)[0], author: 'editor',
+      text: 'comment', created: '2026-01-01T00:00:00Z'
+    });
+    const before = await presentation.comments;
+    await expect((async () => presentation.setCommentStatus(comment.commentId, undefined as unknown as boolean))()).rejects.toThrow();
+    expect(await presentation.comments).toEqual(before);
+    await presentation.setCommentStatus(comment.commentId, true);
   });
 });
