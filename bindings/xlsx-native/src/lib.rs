@@ -4,9 +4,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use betteroffice_xlsx::{
     CalculationOptions, CellEdit, CellRange, CellRef, CellValue as CoreCellValue,
-    HorizontalAlignment, MAX_COLLABORATION_CLIENT_ID, MutationResult as CoreMutationResult,
-    NumberFormatMutation, Proposal as CoreProposal, ProposalEditInput as CoreProposalEditInput,
-    ProposalRequest, RenderOptions, SheetId, StylePatch, TextWrapping, VerticalAlignment, Workbook,
+    MAX_COLLABORATION_CLIENT_ID, MutationResult as CoreMutationResult,
+    NumberFormatMutation as CoreNumberFormatMutation, Proposal as CoreProposal,
+    ProposalEditInput as CoreProposalEditInput, ProposalRequest, RenderOptions, SheetId,
+    StylePatch, Workbook,
 };
 use napi::bindgen_prelude::{AsyncTask, Buffer, Task, ToNapiValue, TypeName};
 use napi::{Env, Error, Result};
@@ -84,6 +85,8 @@ pub struct ProposalCellInput {
     pub sheet: u32,
     pub address: String,
     pub input: String,
+    #[napi(ts_type = "NumberFormatMutation")]
+    pub number_format: Option<serde_json::Value>,
 }
 
 #[napi(object)]
@@ -121,9 +124,26 @@ pub struct StyleInput {
     pub font_size: Option<f64>,
     pub text_color: Option<String>,
     pub fill_color: Option<String>,
+    #[napi(ts_type = "'left' | 'center' | 'right'")]
     pub horizontal_alignment: Option<String>,
+    #[napi(ts_type = "'top' | 'middle' | 'bottom'")]
     pub vertical_alignment: Option<String>,
+    #[napi(ts_type = "'overflow' | 'wrap' | 'clip'")]
     pub text_wrapping: Option<String>,
+    pub border: Option<BorderPatch>,
+    #[napi(ts_type = "StyleProperty[]")]
+    pub clear: Option<Vec<String>>,
+}
+
+#[napi(object)]
+pub struct BorderPatch {
+    #[napi(
+        ts_type = "'all' | 'inner' | 'horizontal' | 'vertical' | 'outer' | 'left' | 'top' | 'right' | 'bottom' | 'none'"
+    )]
+    pub preset: Option<String>,
+    #[napi(ts_type = "'solid' | 'dashed' | 'dotted' | 'double'")]
+    pub style: Option<String>,
+    pub color: Option<String>,
 }
 
 #[napi(object)]
@@ -245,31 +265,12 @@ fn map_proposal(value: &CoreProposal) -> Proposal {
     }
 }
 
-fn horizontal_alignment(value: &str) -> Result<HorizontalAlignment> {
-    match value {
-        "left" => Ok(HorizontalAlignment::Left),
-        "center" => Ok(HorizontalAlignment::Center),
-        "right" => Ok(HorizontalAlignment::Right),
-        _ => Err(error("horizontalAlignment must be left, center, or right")),
-    }
-}
-
-fn vertical_alignment(value: &str) -> Result<VerticalAlignment> {
-    match value {
-        "top" => Ok(VerticalAlignment::Top),
-        "middle" => Ok(VerticalAlignment::Middle),
-        "bottom" => Ok(VerticalAlignment::Bottom),
-        _ => Err(error("verticalAlignment must be top, middle, or bottom")),
-    }
-}
-
-fn text_wrapping(value: &str) -> Result<TextWrapping> {
-    match value {
-        "overflow" => Ok(TextWrapping::Overflow),
-        "wrap" => Ok(TextWrapping::Wrap),
-        "clip" => Ok(TextWrapping::Clip),
-        _ => Err(error("textWrapping must be overflow, wrap, or clip")),
-    }
+fn number_format(value: serde_json::Value) -> Result<CoreNumberFormatMutation> {
+    let value = match value {
+        serde_json::Value::String(name) => serde_json::json!({ "type": name }),
+        value => value,
+    };
+    serde_json::from_value(value).map_err(error)
 }
 
 type Job = Box<dyn FnOnce(&mut Workbook) + Send>;
@@ -650,7 +651,7 @@ impl XlsxWorkbook {
                     sheet: SheetId(edit.sheet),
                     cell: cell_ref(&edit.address)?,
                     input: edit.input,
-                    number_format: None,
+                    number_format: edit.number_format.map(number_format).transpose()?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -729,26 +730,19 @@ impl XlsxWorkbook {
         })
     }
 
-    #[napi(ts_return_type = "Promise<MutationResult>")]
+    #[napi(
+        ts_args_type = "sheet: number, range: string, format: NumberFormatMutation, nowSerial?: number | undefined | null",
+        ts_return_type = "Promise<MutationResult>"
+    )]
     pub fn set_number_format(
         &self,
         sheet: u32,
         range: String,
-        format: String,
+        format: serde_json::Value,
         now_serial: Option<f64>,
     ) -> Result<AsyncTask<PendingTask<MutationResult>>> {
         let range = cell_range(&range)?;
-        let format = match format.to_ascii_lowercase().as_str() {
-            "automatic" => NumberFormatMutation::Automatic,
-            "text" => NumberFormatMutation::PlainText,
-            "number" => NumberFormatMutation::Number,
-            "percent" => NumberFormatMutation::Percent,
-            "scientific" => NumberFormatMutation::Scientific,
-            "currency" => NumberFormatMutation::Currency,
-            "date" => NumberFormatMutation::Date,
-            "time" => NumberFormatMutation::Time,
-            _ => NumberFormatMutation::Custom { pattern: format },
-        };
+        let format = number_format(format)?;
         self.worker.submit(move |workbook| {
             let value = workbook
                 .set_range_number_format(
@@ -762,41 +756,19 @@ impl XlsxWorkbook {
         })
     }
 
-    #[napi(ts_return_type = "Promise<MutationResult>")]
+    #[napi(
+        ts_args_type = "sheet: number, range: string, style: StyleInput, nowSerial?: number | undefined | null",
+        ts_return_type = "Promise<MutationResult>"
+    )]
     pub fn set_style(
         &self,
         sheet: u32,
         range: String,
-        style: StyleInput,
+        style: serde_json::Value,
         now_serial: Option<f64>,
     ) -> Result<AsyncTask<PendingTask<MutationResult>>> {
         let range = cell_range(&range)?;
-        let patch = StylePatch {
-            bold: style.bold,
-            italic: style.italic,
-            strikethrough: style.strikethrough,
-            font_family: style.font_family,
-            font_size: style.font_size,
-            text_color: style.text_color,
-            fill_color: style.fill_color,
-            border: None,
-            horizontal_alignment: style
-                .horizontal_alignment
-                .as_deref()
-                .map(horizontal_alignment)
-                .transpose()?,
-            vertical_alignment: style
-                .vertical_alignment
-                .as_deref()
-                .map(vertical_alignment)
-                .transpose()?,
-            text_wrapping: style
-                .text_wrapping
-                .as_deref()
-                .map(text_wrapping)
-                .transpose()?,
-            clear: Vec::new(),
-        };
+        let patch: StylePatch = serde_json::from_value(style).map_err(error)?;
         self.worker.submit(move |workbook| {
             let value = workbook
                 .patch_range_style(

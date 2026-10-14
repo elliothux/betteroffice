@@ -12,6 +12,18 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { openWorkbook } from '@betteroffice/xlsx-native';
 
 const workbook = await openWorkbook(await readFile('input.xlsx'));
+await workbook.setNumberFormat(0, 'A1', 'plainText');
+await workbook.setNumberFormat(0, 'B1', { type: 'custom', pattern: '0.000' });
+await workbook.setStyle(0, 'A1:B1', {
+  border: { preset: 'all', style: 'solid', color: '#123456' },
+  horizontalAlignment: 'center', textWrapping: 'wrap'
+});
+await workbook.setStyle(0, 'A1', { clear: ['borders'] });
+const proposal = await workbook.propose({
+  agentId: 'editor',
+  edits: [{ sheet: 0, address: 'C1', input: '12.5', numberFormat: 'currency' }]
+});
+await workbook.acceptProposal(proposal.id);
 await writeFile('output.xlsx', await workbook.save());
 ```
 

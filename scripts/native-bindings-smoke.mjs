@@ -38,6 +38,21 @@ for (const load of [(name) => import(name), async (name) => require(name)]) {
   const value = workbook.value(0, 'B2');
   await edit;
   assert.equal((await value).number, 3);
+  await workbook.setNumberFormat(0, 'B2', 'plainText');
+  await workbook.setNumberFormat(0, 'B2', { type: 'custom', pattern: '0.000' });
+  await workbook.setNumberFormat(0, 'B2', 'increaseDecimal');
+  await workbook.setNumberFormat(0, 'B2', 'decreaseDecimal');
+  await workbook.setStyle(0, 'B2', {
+    border: { preset: 'all', style: 'dashed', color: '#123456' },
+    horizontalAlignment: 'right', textWrapping: 'wrap'
+  });
+  await workbook.setStyle(0, 'B2', { clear: ['borders', 'textWrapping'] });
+  const proposal = await workbook.propose({
+    agentId: 'smoke-agent',
+    edits: [{ sheet: 0, address: 'C2', input: '12.5', numberFormat: 'currency' }]
+  });
+  assert.equal(proposal.edits[0].after, '$12.50');
+  await workbook.acceptProposal(proposal.id);
   const sheet = await workbook.renderSheet({ sheet: 0, range: 'A1:B3' });
   assert.deepEqual(sheet.data.subarray(0, 8), pngSignature);
   const reopenedWorkbook = await openWorkbook(await workbook.save());
