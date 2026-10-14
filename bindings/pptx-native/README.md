@@ -19,6 +19,6 @@ Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
 The package shares its version with `@betteroffice/pptx`.
 CommonJS `require()` is also supported.
 
-Edits default to author `wasm` and origin `local`. Set `author` and `origin` in
+Edits default to author `node` and origin `local`. Set `author` and `origin` in
 `openPresentation` options to supply an explicit edit context.
 `setCommentStatus(commentId, resolved)` requires an explicit boolean.

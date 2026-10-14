@@ -13,7 +13,7 @@ const font = readFileSync(
 describe('@betteroffice/pptx-native', () => {
   test('opens, inspects, renders, and saves a presentation', async () => {
     const presentation = await openPresentation(fixture);
-    expect(presentation.author).toBe('wasm');
+    expect(presentation.author).toBe('node');
     expect(presentation.origin).toBe('local');
     const snapshot = await presentation.snapshot();
 

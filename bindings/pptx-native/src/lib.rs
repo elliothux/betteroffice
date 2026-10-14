@@ -1004,7 +1004,7 @@ pub fn open_presentation(
     Ok(AsyncTask::new(OpenTask {
         bytes: data.to_vec(),
         client_id: options.client_id.map(client_id).transpose()?,
-        author: options.author.unwrap_or_else(|| "wasm".to_owned()),
+        author: options.author.unwrap_or_else(|| "node".to_owned()),
         origin: options
             .origin
             .as_deref()
