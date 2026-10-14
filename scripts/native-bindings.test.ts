@@ -335,10 +335,10 @@ describe('native package release wiring', () => {
         step.uses === 'actions/upload-artifact@v4' &&
         step.with.name === '${{ inputs.binding }}-native.${{ matrix.platform.target }}'
     );
+    const testing = steps.find((step: any) => step.name === 'Test binding');
+    expect(testing.run).toBe('bun test bindings/${{ inputs.binding }}-native/index.test.ts');
     expect(steps.indexOf(loader)).toBe(steps.indexOf(binary) + 1);
-    expect(steps.indexOf(loader)).toBeGreaterThan(
-      steps.findIndex((step: any) => step.name === 'Test binding')
-    );
+    expect(steps.indexOf(loader)).toBeGreaterThan(steps.indexOf(testing));
   });
 
   test('CI builds every path and checks declarations and all three runtimes', () => {
